@@ -1,0 +1,71 @@
+{
+  "name": "kakao-report-organizer",
+  "productName": "카톡보고정리",
+  "version": "1.0.1",
+  "description": "카카오톡 행사보고 메시지를 Gemini로 정형화하여 엑셀로 저장하는 데스크톱 앱",
+  "author": "Peter",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win --x64",
+    "build:dir": "electron-builder --win --dir",
+    "release": "electron-builder --win --x64 --publish always"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.peter.kakao-report",
+    "productName": "카톡보고정리",
+    "copyright": "Copyright © 2026 Peter",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "카톡보고정리",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "license": "build/license.rtf"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "rangminfather",
+        "repo": "kakao-excel-app",
+        "releaseType": "release"
+      }
+    ]
+  }
+}
