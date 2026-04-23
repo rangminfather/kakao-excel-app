@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, safeStorage, nativeImage, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, safeStorage, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
@@ -64,6 +64,16 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
+
+  // F12 / Ctrl+Shift+I 로 언제든 DevTools 토글 (프로덕션 디버깅용)
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown') {
+      if (input.key === 'F12' || (input.control && input.shift && (input.key === 'I' || input.key === 'i'))) {
+        mainWindow.webContents.toggleDevTools();
+        event.preventDefault();
+      }
+    }
+  });
 
   mainWindow.on('close', (e) => {
     if (!isQuitting && store.get('minimizeToTray')) {
@@ -522,43 +532,4 @@ ipcMain.handle('update:install', () => {
 });
 ipcMain.handle('update:current', () => app.getVersion());
 
-/* GitHub Releases API에서 릴리스 노트 목록 가져오기 (업데이트 내역 창용) */
-ipcMain.handle('update:releases', async () => {
-  return new Promise((resolve) => {
-    const request = net.request({
-      method: 'GET',
-      url: 'https://api.github.com/repos/rangminfather/kakao-excel-app/releases?per_page=20',
-      redirect: 'follow'
-    });
-    request.setHeader('User-Agent', 'kakao-excel-app');
-    request.setHeader('Accept', 'application/vnd.github+json');
-    let body = '';
-    request.on('response', (res) => {
-      res.on('data', (chunk) => { body += chunk.toString('utf8'); });
-      res.on('end', () => {
-        try {
-          const arr = JSON.parse(body);
-          if (!Array.isArray(arr)) {
-            resolve({ ok: false, error: (arr && arr.message) || 'Unexpected response' });
-            return;
-          }
-          resolve({
-            ok: true,
-            releases: arr.map(r => ({
-              version: (r.tag_name || '').replace(/^v/, ''),
-              name: r.name || r.tag_name,
-              published: r.published_at,
-              body: r.body || '',
-              prerelease: !!r.prerelease,
-              url: r.html_url
-            }))
-          });
-        } catch (e) {
-          resolve({ ok: false, error: e.message });
-        }
-      });
-    });
-    request.on('error', (err) => resolve({ ok: false, error: err.message }));
-    request.end();
-  });
-});
+// GitHub Releases 조회는 렌더러에서 직접 fetch (CSP connect-src에 api.github.com 허용)

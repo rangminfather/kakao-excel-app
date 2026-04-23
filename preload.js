@@ -43,7 +43,6 @@ contextBridge.exposeInMainWorld('kapi', {
     check: () => ipcRenderer.invoke('update:check'),
     install: () => ipcRenderer.invoke('update:install'),
     currentVersion: () => ipcRenderer.invoke('update:current'),
-    releases: () => ipcRenderer.invoke('update:releases'),
     onEvent: (type, cb) => {
       const channel = `update:${type}`;
       const handler = (_e, payload) => cb(payload);

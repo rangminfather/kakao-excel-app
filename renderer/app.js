@@ -1142,20 +1142,59 @@ function setupUpdateUI() {
   // 업데이트 내역 모달
   const modal = document.getElementById('releasesModal');
   const body = document.getElementById('releasesBody');
-  document.getElementById('btnShowReleases').addEventListener('click', async () => {
+  async function fetchReleases() {
+    try {
+      const r = await fetch('https://api.github.com/repos/rangminfather/kakao-excel-app/releases?per_page=20', {
+        headers: { 'Accept': 'application/vnd.github+json' },
+        cache: 'no-store'
+      });
+      if (!r.ok) {
+        const txt = await r.text().catch(() => '');
+        return { ok: false, error: `GitHub ${r.status}: ${txt.slice(0, 200)}` };
+      }
+      const arr = await r.json();
+      if (!Array.isArray(arr)) return { ok: false, error: (arr && arr.message) || 'Unexpected response' };
+      return {
+        ok: true,
+        releases: arr.map(x => ({
+          version: (x.tag_name || '').replace(/^v/, ''),
+          name: x.name || x.tag_name,
+          published: x.published_at,
+          body: x.body || '',
+          prerelease: !!x.prerelease,
+          url: x.html_url
+        }))
+      };
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  }
+
+  function openModal() {
     modal.classList.remove('hidden');
-    document.getElementById('releasesCurrentVersion').textContent = `현재 버전: v${await kapi.update.currentVersion()}`;
+    modal.style.display = 'flex';
+  }
+  function closeModal() {
+    modal.classList.add('hidden');
+    modal.style.display = '';
+  }
+
+  document.getElementById('btnShowReleases').addEventListener('click', async () => {
+    console.log('[releases] open modal');
+    openModal();
+    const current = await kapi.update.currentVersion();
+    document.getElementById('releasesCurrentVersion').textContent = `현재 버전: v${current}`;
     body.innerHTML = '<div class="text-center text-gray-500 text-sm py-8">불러오는 중...</div>';
-    const res = await kapi.update.releases();
+    const res = await fetchReleases();
     if (!res.ok) {
-      body.innerHTML = `<div class="text-center text-red-600 text-sm py-8">${escapeHtml(res.error || '불러오기 실패')}</div>`;
+      body.innerHTML = `<div class="text-center text-red-600 text-sm py-8 px-2">${escapeHtml(res.error || '불러오기 실패')}</div>`;
+      console.warn('[releases] fetch failed:', res.error);
       return;
     }
     if (!res.releases.length) {
       body.innerHTML = '<div class="text-center text-gray-500 text-sm py-8">릴리스가 없습니다</div>';
       return;
     }
-    const current = await kapi.update.currentVersion();
     body.innerHTML = res.releases.map(r => {
       const d = r.published ? new Date(r.published).toLocaleDateString('ko-KR') : '';
       const isCurrent = r.version === current;
@@ -1172,8 +1211,8 @@ function setupUpdateUI() {
       `;
     }).join('');
   });
-  document.getElementById('btnCloseReleases').addEventListener('click', () => modal.classList.add('hidden'));
-  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+  document.getElementById('btnCloseReleases').addEventListener('click', closeModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
   document.getElementById('btnCheckUpdate').addEventListener('click', async () => {
     banner.dataset.manualCheck = '1';
     toast('업데이트 확인 중...', 'info');

@@ -1,7 +1,7 @@
 {
   "name": "kakao-report-organizer",
   "productName": "카톡보고정리",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "카카오톡 행사보고 메시지를 Gemini로 정형화하여 엑셀로 저장하는 데스크톱 앱",
   "author": "Peter",
   "main": "main.js",
