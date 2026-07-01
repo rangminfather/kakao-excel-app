@@ -11,6 +11,10 @@ const MODEL_OPTIONS = [
   { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (가볍고 한도↑)' },
 ];
 const DEFAULT_MODEL = 'gemini-2.5-flash';
+const BULK_FILE_BYTES = 300 * 1024;
+const BULK_MESSAGE_COUNT = 500;
+const BULK_CANDIDATE_COUNT = 80;
+const RESULT_PREVIEW_LIMIT = 300;
 
 // 메모리 캐시 (IPC 비동기 부담 완화 — 기존 동기 lsGet/lsSet 패턴 유지용)
 const cache = {
@@ -395,7 +399,7 @@ async function fetchGeminiJson(apiKey, model, body) {
   return res.json();
 }
 
-async function callGemini(apiKey, userText, images = []) {
+async function callGemini(apiKey, userText, images = [], modelOverride = null) {
   const parts = [{ text: buildUserPrompt(userText) }];
   for (const img of images) {
     parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
@@ -411,7 +415,7 @@ async function callGemini(apiKey, userText, images = []) {
   };
   let geminiData;
   let lastError;
-  const modelsToTry = getGeminiModelFallbacks(cache.model);
+  const modelsToTry = getGeminiModelFallbacks(modelOverride || cache.model);
   for (const model of modelsToTry) {
     for (let attempt = 0; attempt < GEMINI_RETRY_DELAYS.length; attempt++) {
       try {
@@ -554,10 +558,19 @@ function renderTable() {
   const tbody = document.getElementById('resultBody');
   tbody.innerHTML = '';
   document.getElementById('resultPanel').classList.toggle('hidden', currentRows.length === 0);
+  const visibleRows = currentRows.slice(0, RESULT_PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, currentRows.length - visibleRows.length);
+  const notice = document.getElementById('resultPreviewNotice');
+  if (notice) {
+    notice.classList.toggle('hidden', hiddenCount === 0);
+    notice.textContent = hiddenCount > 0
+      ? `\uD654\uBA74 \uC131\uB2A5\uC744 \uC704\uD574 ${visibleRows.length.toLocaleString('ko-KR')}\uD589\uB9CC \uBBF8\uB9AC\uBCF4\uAE30\uB85C \uD45C\uC2DC\uD569\uB2C8\uB2E4. \uB098\uBA38\uC9C0 ${hiddenCount.toLocaleString('ko-KR')}\uD589\uC740 \uC800\uC7A5\uB41C \uC5D1\uC140 \uD30C\uC77C\uC5D0\uC11C \uD655\uC778\uD558\uC138\uC694.`
+      : '';
+  }
   document.getElementById('resultSummary').textContent =
-    `${currentRows.length}개 행 · ${currentRows.filter(r=>r.flag).length}개 검증오류`;
+    `${currentRows.length.toLocaleString('ko-KR')}\uD589 \u00B7 ${currentRows.filter(r=>r.flag).length.toLocaleString('ko-KR')}\uD589 \uAC80\uD1A0 \uD544\uC694`;
 
-  currentRows.forEach((row, idx) => {
+  visibleRows.forEach((row, idx) => {
     const tr = document.createElement('tr');
     tr.className = row.flag ? 'row-flag border-t' : 'border-t';
     tr.innerHTML = `<td class="p-2 text-gray-400">${idx+1}</td>`;
@@ -571,7 +584,7 @@ function renderTable() {
     }
     const tdFlag = document.createElement('td');
     tdFlag.className = 'p-2 text-center';
-    tdFlag.textContent = row.flag ? '⚠️' : '';
+    tdFlag.textContent = row.flag ? '\uD655\uC778' : '';
     tr.appendChild(tdFlag);
     const tdRaw = document.createElement('td');
     tdRaw.className = 'p-2 text-gray-500 text-xs';
@@ -582,7 +595,7 @@ function renderTable() {
     tdDel.className = 'p-2 text-center';
     const delBtn = document.createElement('button');
     delBtn.className = 'text-red-600 text-xs underline';
-    delBtn.textContent = '삭제';
+    delBtn.textContent = '\uC0AD\uC81C';
     delBtn.addEventListener('click', () => {
       currentRows.splice(idx, 1);
       renderTable();
@@ -592,7 +605,6 @@ function renderTable() {
     tbody.appendChild(tr);
   });
 }
-
 function formatCell(v, type) {
   if (v === null || v === undefined || v === '') return '';
   if (type === 'int') {
@@ -1050,6 +1062,16 @@ function parseReportLocal(msg) {
   return { rows, unresolved: rows.length === 0 };
 }
 
+function isBulkWorkload({ fileSize = 0, messageCount = 0, candidateCount = 0 } = {}) {
+  return fileSize >= BULK_FILE_BYTES || messageCount >= BULK_MESSAGE_COUNT || candidateCount >= BULK_CANDIDATE_COUNT;
+}
+
+function modelForWorkload(primaryModel, bulk) {
+  if (!bulk) return primaryModel || DEFAULT_MODEL;
+  if (primaryModel === 'gemini-2.5-flash') return 'gemini-2.5-flash-lite';
+  return primaryModel || 'gemini-2.5-flash-lite';
+}
+
 function shouldAskAiForReport(msg) {
   const body = String(msg?.body || '');
   if (!body.trim()) return false;
@@ -1084,7 +1106,7 @@ function makeReviewRow(item, reason) {
   };
 }
 
-async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
+async function processItemsWithMode(items, apiKey, runStamp, onProgress, modelOverride = null) {
   const mode = cache.processMode || 'hybrid';
   const allRows = [];
   const localRawRows = [];
@@ -1138,7 +1160,7 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
         return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
       }).join('\n\n---\n\n');
       try {
-        const rows = await callGemini(apiKey, combined);
+        const rows = await callGemini(apiKey, combined, [], modelOverride);
         const normalized = normalizeRows(rows);
         normalized.forEach(r => {
           r.processed_at = runStamp;
@@ -1269,6 +1291,12 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     // 보고형 필터 + 해시 중복 제거 (명시적 날짜/기간 선택 시 중복검사 우회)
     setStep('dedupe', 'current');
     const candidates = filtered.filter(m => looksLikeReport(m.body));
+    const bulk = isBulkWorkload({
+      fileSize: selectedFile.size || readRes.size || 0,
+      messageCount: filtered.length,
+      candidateCount: candidates.length
+    });
+    const effectiveModel = modelForWorkload(cache.model, bulk);
     const prevHashes = new Set(cache.processedHashes);
     const hashed = candidates.map(m => ({ msg: m, hash: messageHash(m) }));
     const explicitPick = (mode === 'pickDate' || mode === 'custom' || mode === 'all');
@@ -1284,6 +1312,8 @@ document.getElementById('runTxt').addEventListener('click', async () => {
       <div><b>파일</b>: ${escapeHtml(selectedFile.name)}</div>
       <div><b>대상</b>: 전체 ${msgs.length} / 범위내 ${filtered.length} / 보고형 ${candidates.length} / 처리 ${fresh.length}${explicitPick ? ' <span class="text-amber-600">(특정 날짜 · 중복검사 OFF)</span>' : ` / 중복 ${dupCount}`}</div>
     `;
+    document.getElementById('txtPreview').insertAdjacentHTML('beforeend',
+      `<div><b>AI 모델</b>: ${escapeHtml(effectiveModel)}${bulk ? ' <span class="text-amber-600">(대량 감지: Lite 자동 사용)</span>' : ''}</div>`);
 
     if (!fresh.length) {
       setStep('ai', 'done', '스킵');
@@ -1309,7 +1339,7 @@ document.getElementById('runTxt').addEventListener('click', async () => {
       const scanText = total ? ` scan ${scanned}/${total}` : '';
       setStep('ai', 'current', `local ${localCount} / AI ${aiCount}/${aiTotal}${scanText}`);
       setProgress(35 + Math.round((Math.max(doneCount, scanned || 0) / fresh.length) * 50));
-    });
+    }, effectiveModel);
     const allRows = processed.rows;
     newHashes.push(...fresh.map(x => x.hash));
     setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / review ${processed.reviewCount} / skip ${processed.skippedCount}`);

@@ -167,6 +167,16 @@
 
       <div id="txtPreview" class="text-sm text-gray-700 bg-gray-50 rounded-lg p-3 hidden"></div>
 
+      <div class="border rounded-lg p-3 bg-gray-50">
+        <label class="block text-xs text-gray-600 mb-1">저장 방식</label>
+        <select id="saveModeSelect" class="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+          <option value="append">지정된 누적 파일에 계속 추가</option>
+          <option value="new">실행할 때마다 새 엑셀 파일로 저장</option>
+          <option value="manual">자동 저장 안 함 (결과 확인 후 버튼으로 저장)</option>
+        </select>
+        <p class="mt-1 text-xs text-gray-500">전체(AtoZ) 또는 대량 파일은 새 파일 저장을 권장합니다.</p>
+      </div>
+
       <button id="runTxt" class="btn w-full px-6 rounded-lg font-bold text-black text-base" style="background: var(--kakao)">🚀 추출 실행</button>
     </section>
 
@@ -221,6 +231,7 @@
       <div>
         <h2 class="font-bold">결과</h2>
         <p id="resultSummary" class="text-xs text-gray-500"></p>
+        <p id="resultPreviewNotice" class="text-xs text-amber-700 mt-1 hidden"></p>
       </div>
       <div class="flex gap-2 flex-wrap items-center">
         <button id="saveAccumulate" class="btn px-5 rounded-lg font-bold text-black text-sm" style="background: var(--kakao)" title="설정에서 지정한 하나의 누적 파일에 이 행들을 이어붙입니다 (메인 사용 흐름)">📥 누적 파일에 추가</button>
@@ -327,16 +338,6 @@
         <!-- 경로 설정 -->
         <div class="space-y-3">
           <h3 class="text-sm font-semibold">📁 경로 설정</h3>
-
-          <div>
-            <label class="block text-xs text-gray-600 mb-1">저장 방식</label>
-            <select id="saveModeSelect" class="w-full border rounded-lg px-3 py-2 text-sm bg-white">
-              <option value="append">지정된 누적 파일에 계속 추가</option>
-              <option value="new">실행할 때마다 새 엑셀 파일로 저장</option>
-              <option value="manual">자동 저장 안 함 (결과 확인 후 버튼으로 저장)</option>
-            </select>
-            <p class="mt-1 text-xs text-gray-500">전체(AtoZ) 재분석은 중복 누적을 피하려면 새 파일 저장을 권장합니다.</p>
-          </div>
 
           <div>
             <label class="block text-xs text-gray-600 mb-1">감시 폴더 (카톡 .txt 자동 감지)</label>
