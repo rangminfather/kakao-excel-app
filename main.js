@@ -8,13 +8,20 @@ const os = require('os');
 const Store = require('electron-store');
 const ExcelJS = require('exceljs');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log');
 
 const isDev = process.argv.includes('--dev');
+
+// 파일 로그: %APPDATA%/카톡보고정리/logs/main.log
+log.transports.file.level = 'info';
+log.transports.file.maxSize = 5 * 1024 * 1024; // 5 MB rotate
+log.transports.console.level = 'info';
 
 // 업데이트 정책: 자동 다운로드 O, 자동 설치 X (사용자가 버튼 눌러야 설치)
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = false;
-autoUpdater.logger = { info: console.log, warn: console.warn, error: console.error, debug: () => {} };
+autoUpdater.logger = log;
+log.info(`[app] starting v${require('./package.json').version}, isDev=${isDev}, isPackaged=${app.isPackaged}, platform=${process.platform}`);
 
 const store = new Store({
   name: 'settings',
@@ -42,7 +49,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 
-const EXCEL_HEADER = ['날짜','작성자','지점','시작시간','종료시간','품목','단가','수량','금액','합계','검증오류','원본'];
+const EXCEL_HEADER = ['날짜','전송시간','작성자','지점','시작시간','종료시간','품목','단가','수량','금액','AI정정금액','합계','AI정정합계','검증오류','원본','처리일시'];
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -338,6 +345,7 @@ async function cleanupArchiveIfNeeded() {
 function rowToArray(r) {
   return [
     r.date ?? '',
+    r.sent_time ?? '',
     r.writer ?? '',
     r.store ?? '',
     r.time_start ?? '',
@@ -346,20 +354,73 @@ function rowToArray(r) {
     r.unit_price ?? '',
     r.qty ?? '',
     r.amount ?? '',
+    r.amount_corrected ?? '',
     r.total ?? '',
+    r.total_corrected ?? '',
     r.flag ? 'X' : '',
-    r.raw ?? ''
+    r.raw ?? '',
+    r.processed_at ?? ''
   ];
 }
 
 async function loadOrCreateWorkbook(filePath) {
   const wb = new ExcelJS.Workbook();
+  const applyColumnWidths = (ws) => {
+    ws.columns = [
+      { width: 12 }, { width: 9 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
+      { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 14 },
+      { width: 12 }, { width: 14 }, { width: 9 }, { width: 40 }, { width: 18 }
+    ];
+  };
+  const paintHeader = (ws) => {
+    const header = ws.getRow(1);
+    header.font = { bold: true };
+    header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
+  };
   if (fsSync.existsSync(filePath)) {
     try {
       await wb.xlsx.readFile(filePath);
       let ws = wb.getWorksheet('카톡행사보고') || wb.worksheets[0];
       if (!ws) ws = wb.addWorksheet('카톡행사보고');
-      if (ws.rowCount === 0) ws.addRow(EXCEL_HEADER);
+      if (ws.rowCount === 0) {
+        ws.addRow(EXCEL_HEADER);
+        applyColumnWidths(ws);
+        paintHeader(ws);
+      } else {
+        // 헤더 이름 기반 마이그레이션: 기존 헤더와 최신 EXCEL_HEADER를 매핑해 재배열
+        const oldHeaderRow = ws.getRow(1);
+        const oldHeaders = [];
+        for (let i = 1; i <= ws.columnCount; i++) {
+          oldHeaders.push(String(oldHeaderRow.getCell(i).value ?? '').trim());
+        }
+        const needMigration = oldHeaders.length !== EXCEL_HEADER.length
+          || !EXCEL_HEADER.every((h, i) => oldHeaders[i] === h);
+        if (needMigration) {
+          // 모든 데이터 행을 읽어와서 헤더 이름 기반으로 재매핑
+          const oldData = [];
+          for (let n = 2; n <= ws.rowCount; n++) {
+            const row = ws.getRow(n);
+            const arr = [];
+            for (let i = 1; i <= oldHeaders.length; i++) {
+              const v = row.getCell(i).value;
+              arr.push(v === null || v === undefined ? '' : v);
+            }
+            oldData.push(arr);
+          }
+          // 새 헤더별로 기존 헤더의 인덱스 찾기 (-1 = 공란)
+          const mapping = EXCEL_HEADER.map(newName => oldHeaders.indexOf(newName));
+          // 시트 초기화 & 재작성
+          ws.spliceRows(1, ws.rowCount);
+          ws.addRow(EXCEL_HEADER);
+          for (const oldRow of oldData) {
+            const newRow = mapping.map(idx => idx >= 0 ? oldRow[idx] : '');
+            ws.addRow(newRow);
+          }
+          log.info(`[excel] schema migrated → v4: ${filePath}`);
+        }
+        applyColumnWidths(ws);
+        paintHeader(ws);
+      }
       return { wb, ws };
     } catch (e) {
       // 파일 깨졌으면 백업 후 새로 생성
@@ -369,14 +430,8 @@ async function loadOrCreateWorkbook(filePath) {
   }
   const ws = wb.addWorksheet('카톡행사보고');
   ws.addRow(EXCEL_HEADER);
-  ws.columns = [
-    { width: 12 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
-    { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 12 },
-    { width: 9 }, { width: 40 }
-  ];
-  const header = ws.getRow(1);
-  header.font = { bold: true };
-  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
+  applyColumnWidths(ws);
+  paintHeader(ws);
   return { wb, ws };
 }
 
@@ -385,6 +440,17 @@ ipcMain.handle('excel:appendRows', async (_e, rows, targetPath) => {
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const { wb, ws } = await loadOrCreateWorkbook(filePath);
+    const hadExistingData = ws.rowCount > 1; // 헤더 외에 데이터가 이미 있으면 배치 구분 추가
+    if (hadExistingData) {
+      // 빈 행 3줄로 시각 여백
+      for (let i = 0; i < 3; i++) ws.addRow([]);
+      // 컬럼 헤더를 다시 찍어서 배치별 자급자족 형태
+      const hdr = ws.addRow(EXCEL_HEADER);
+      hdr.font = { bold: true };
+      hdr.eachCell((cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
+      });
+    }
     for (const r of rows) {
       const row = ws.addRow(rowToArray(r));
       if (r.flag) {
@@ -396,7 +462,9 @@ ipcMain.handle('excel:appendRows', async (_e, rows, targetPath) => {
     await wb.xlsx.writeFile(filePath);
     return { ok: true, path: filePath, appendedRows: rows.length };
   } catch (e) {
-    return { ok: false, error: e.message };
+    const msg = String(e.message || e);
+    const code = e.code || (msg.match(/EBUSY|EPERM|EACCES/) || [])[0] || '';
+    return { ok: false, error: msg, code };
   }
 });
 
@@ -531,5 +599,14 @@ ipcMain.handle('update:install', () => {
   return true;
 });
 ipcMain.handle('update:current', () => app.getVersion());
+ipcMain.handle('update:openLogs', async () => {
+  try {
+    const logPath = log.transports.file.getFile().path;
+    const result = await shell.openPath(path.dirname(logPath));
+    return result === '' ? { ok: true, path: logPath } : { ok: false, error: result };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 
 // GitHub Releases 조회는 렌더러에서 직접 fetch (CSP connect-src에 api.github.com 허용)

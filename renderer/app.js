@@ -1,4 +1,5 @@
 'use strict';
+(function() {
 
 /* =========================================================================
  * 0) 공통 유틸
@@ -8,8 +9,6 @@ const kapi = window.kapi;
 const MODEL_OPTIONS = [
   { id: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash (기본 권장)' },
   { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (가볍고 한도↑)' },
-  { id: 'gemini-2.0-flash',      label: 'Gemini 2.0 Flash' },
-  { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite' },
 ];
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 
@@ -37,6 +36,10 @@ const cache = {
 async function loadAllSettings() {
   const all = await kapi.store.getAll();
   cache.model = all.model || DEFAULT_MODEL;
+  if (!MODEL_OPTIONS.some(m => m.id === cache.model)) {
+    cache.model = DEFAULT_MODEL;
+    await kapi.store.set('model', cache.model);
+  }
   cache.processedHashes = Array.isArray(all.processedHashes) ? all.processedHashes : [];
   cache.lastProcessedDate = all.lastProcessedDate || null;
   cache.accumulatedRows = Array.isArray(all.accumulatedRows) ? all.accumulatedRows : [];
@@ -75,6 +78,12 @@ function toast(msg, kind = 'info', ms = 2400) {
     el.classList.remove('show');
     setTimeout(() => el.remove(), 300);
   }, ms);
+}
+
+function nowTimestamp() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function todayYMD() {
@@ -151,33 +160,62 @@ document.querySelectorAll('input[name=fileSource]').forEach(r => {
 /* =========================================================================
  * 2) 카톡 .txt 파서
  * ========================================================================= */
+// 포맷 1 (구형): "2026년 4월 20일 오후 8:02, 윤순희 : 본문"
 const KAKAO_HEADER_RE = /^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일\s*(오전|오후)\s*(\d{1,2}):(\d{2}),\s*([^:]+?)\s*:\s*(.*)$/;
+// 포맷 2 (신형) 날짜 섹션 구분선: "--------------- 2026년 4월 20일 월요일 ---------------"
+const DAY_SEPARATOR_RE = /^-+\s*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일\s*[^-]*-+\s*$/;
+// 포맷 2 (신형) 메시지: "[윤순희 SC 대구1] [오후 8:02] 본문"
+const BRACKET_HEADER_RE = /^\[([^\]]+)\]\s*\[(오전|오후)\s*(\d{1,2}):(\d{2})\]\s*(.*)$/;
 
 function parseKakaoTxt(text) {
   const lines = text.split(/\r?\n/);
   const messages = [];
   let cur = null;
-  for (const raw of lines) {
-    const line = raw;
+  let currentDate = null; // 신형 포맷용
+  const pushCur = () => { if (cur) { messages.push(cur); cur = null; } };
+
+  for (const line of lines) {
+    // 신형: 날짜 구분선
+    const ds = line.match(DAY_SEPARATOR_RE);
+    if (ds) {
+      pushCur();
+      currentDate = `${ds[1]}-${String(ds[2]).padStart(2,'0')}-${String(ds[3]).padStart(2,'0')}`;
+      continue;
+    }
+    // 구형: "2026년 4월 20일 오후 8:02, 이름: 본문"
     const m = line.match(KAKAO_HEADER_RE);
     if (m) {
-      if (cur) messages.push(cur);
+      pushCur();
       let hh = parseInt(m[5], 10);
       if (m[4] === '오후' && hh !== 12) hh += 12;
       if (m[4] === '오전' && hh === 12) hh = 0;
-      const date = `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
-      const time = `${String(hh).padStart(2,'0')}:${m[6]}`;
-      const firstBody = m[8] || '';
       cur = {
-        date, time,
+        date: `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`,
+        time: `${String(hh).padStart(2,'0')}:${m[6]}`,
         writer: m[7].trim(),
-        bodyLines: firstBody ? [firstBody] : []
+        bodyLines: m[8] ? [m[8]] : []
       };
-    } else if (cur) {
-      cur.bodyLines.push(line);
+      continue;
     }
+    // 신형: "[이름] [오전/오후 H:MM] 본문"
+    const b = line.match(BRACKET_HEADER_RE);
+    if (b && currentDate) {
+      pushCur();
+      let hh = parseInt(b[3], 10);
+      if (b[2] === '오후' && hh !== 12) hh += 12;
+      if (b[2] === '오전' && hh === 12) hh = 0;
+      cur = {
+        date: currentDate,
+        time: `${String(hh).padStart(2,'0')}:${b[4]}`,
+        writer: b[1].trim(),
+        bodyLines: b[5] ? [b[5]] : []
+      };
+      continue;
+    }
+    // 본문 연속
+    if (cur) cur.bodyLines.push(line);
   }
-  if (cur) messages.push(cur);
+  pushCur();
   return messages.map(msg => {
     const body = msg.bodyLines.join('\n').replace(/\s+$/,'').trim();
     return {
@@ -192,16 +230,15 @@ function parseKakaoTxt(text) {
 
 function looksLikeReport(body) {
   if (!body) return false;
-  if (body.length < 10) return false;
-  if (/^.+님이 들어왔습니다\.?$/.test(body)) return false;
-  if (/^.+님이 나갔습니다\.?$/.test(body)) return false;
-  if (/^사진$/.test(body.trim())) return false;
-  if (/^이모티콘$/.test(body.trim())) return false;
-  if (/[xX×*]/.test(body) && /\d/.test(body)) return true;
-  if (/=\s*[\d,]+/.test(body)) return true;
-  if (/총[\s\-:]*[\d,]+/.test(body)) return true;
-  if (/행사|시간|마트|지점|점$/.test(body)) return true;
-  return false;
+  const t = body.trim();
+  if (t.length < 5) return false;
+  // 명백한 non-report만 제외 (나머지는 AI에 위임 — 누락 방지가 토큰 절약보다 우선)
+  if (/^.+님이 (들어왔습니다|나갔습니다)\.?$/.test(t)) return false;
+  if (/^(사진|동영상|이모티콘|Voice Note|음성메시지)$/.test(t)) return false;
+  if (/^사진 \d+장$/.test(t)) return false;
+  if (/^동영상 \d+개$/.test(t)) return false;
+  if (/^파일:\s*/.test(t)) return false;
+  return true;
 }
 
 /* =========================================================================
@@ -209,19 +246,45 @@ function looksLikeReport(body) {
  * ========================================================================= */
 const SYSTEM_PROMPT = `당신은 한국 마트 행사 보고 정형화 엔진이다.
 
-[규칙]
-1. 아래 스키마 외 필드는 절대 생성하지 않는다.
-2. 원문에 명시되지 않은 값은 null로 둔다. 추론 금지.
-3. 품목은 행 단위로 분리한다 (1 메시지 N 품목 → N 행).
-4. 숫자 검증: unit_price × qty 가 amount와 다르면 flag=true, 같으면 flag=false.
-5. 합계(total)는 "총-...원", "합계", "Total" 등으로 표시된 값을 **해당 메시지의 마지막 품목 행에만** 넣고 나머지는 null.
-6. 시간 표현: "11~20시" → time_start="11:00", time_end="20:00". 단일 시각 불명확시 null.
-7. 숫자는 콤마/기호 제거 후 정수. 단위(원, 개, ×, x, X, *) 제거.
-8. date는 메시지 헤더나 입력에 명시된 날짜를 그대로 사용한다. 없으면 null.
-9. 출력은 **JSON 배열만**. 설명·마크다운·코드펜스 금지.
+[블록 분리]
+- 입력은 여러 보고 메시지(블록)의 나열. 빈 줄 또는 새 작성자 이름/매장명이 나오면 새 블록 시작.
+- 각 블록은 독립적으로 처리한다.
+
+[작성자(writer)]
+1. 우선순위:
+   (a) **입력 헤더 [WRITER: XXX]가 있으면 XXX를 verbatim(글자 그대로, 자르지 말 것)으로 사용.** 예: "[WRITER: 김정아 트레이더스 비산점 행사(고정)]" → writer="김정아 트레이더스 비산점 행사(고정)". 이름만 잘라내지 말 것.
+   (b) [WRITER:] 헤더가 없으면 블록 첫 줄 또는 매장명 직전의 한글 이름 (예: "윤순희 SC 대구1", "방 명화 010-...")
+   (c) 헤더도 없고 첫 줄에도 없으면 괄호 안의 이름 (예: "유말점 행사(순희)" → "순희")
+2. 한 블록에서 파악한 작성자는 그 블록의 **모든 행(품목 + 소계)에 동일하게 복사**.
+3. (a)(b)(c) 어디에서도 찾을 수 없을 때만 null.
+
+[전송시간(sent_time)]
+4. 입력 헤더 [TIME: HH:MM]이 있으면 해당 블록의 모든 행에 sent_time으로 복사. 없으면 null.
+5. 행사 시간(time_start/time_end)과는 다른 필드다. sent_time은 "카톡 메시지를 보낸 시각".
+
+[품목 행]
+4. 품목은 행 단위로 분리 (1 메시지 N 품목 → N 행).
+5. 단가/수량/금액 중 일부만 있어도 가능한 만큼 채운다. 없는 값은 null.
+6. 검증: unit_price × qty ≠ amount 이면 flag=true. 값 부족·일치면 flag=false.
+7. 숫자는 콤마/원/×/x/X/*/~ 제거 후 정수. 단위("개", "원") 제거.
+
+[소계 행 — 중요]
+8. 블록에 "총-...원", "합계", "행사결과 NNN", 또는 마지막 줄의 단독 금액("211,440원", "행사결과 1040720")이 나오면:
+   → 해당 블록의 품목 행들 뒤에 **별도 소계 행 하나를 추가**.
+   → 소계 행 필드: item=null, unit_price=null, qty=null, amount=null, total=<총합>, flag=false, raw="소계".
+   → date/writer/store/time_start/time_end는 같은 블록의 품목 행과 동일하게 복사.
+9. 총합 표시가 없는 블록은 소계 행 생성 금지.
+
+[시간·날짜]
+10. "11~20시" → time_start="11:00", time_end="20:00". 단일 시각/불명확시 null.
+11. date는 입력 헤더 [DATE:...] 기본값 사용. 메시지 내 명시 날짜가 있으면 그것이 우선.
+
+[출력]
+12. JSON 배열만. 설명·마크다운·코드펜스 금지. 아래 스키마 외 필드 금지.
 
 [스키마]
 { "date": "YYYY-MM-DD"|null,
+  "sent_time": "HH:MM"|null,
   "writer": string|null,
   "store": string|null,
   "time_start": "HH:MM"|null,
@@ -234,39 +297,90 @@ const SYSTEM_PROMPT = `당신은 한국 마트 행사 보고 정형화 엔진이
   "flag": bool,
   "raw": string }
 
-[예시 1 입력]
-[DATE: 2026-04-23] [WRITER: 윤순희]
-탑마트 죽도점
-시간 11~20시
-행사결과
-리얼버터-3748×72=269,280
-오리지널-3748×55=205,700
-총-475,000원
+[예시 입력]
+[DATE: 2026-04-20] [TIME: 10:23] [WRITER: 김포근 메가마트 울산점]
+울산 남목마트
+10~19
+부추창펀
+41×5980=245,180
 
-[예시 1 출력]
+---
+
+[DATE: 2026-04-20] [TIME: 11:01] [WRITER: 김정아 트레이더스 비산점 행사(고정)]
+비산트레이더스
+11시~20시
+들기름30봉 9480x30
+
+[예시 출력]
 [
- {"date":"2026-04-23","writer":"윤순희","store":"탑마트 죽도점","time_start":"11:00","time_end":"20:00","item":"리얼버터","unit_price":3748,"qty":72,"amount":269280,"total":null,"flag":false,"raw":"리얼버터-3748×72=269,280"},
- {"date":"2026-04-23","writer":"윤순희","store":"탑마트 죽도점","time_start":"11:00","time_end":"20:00","item":"오리지널","unit_price":3748,"qty":55,"amount":205700,"total":475000,"flag":false,"raw":"오리지널-3748×55=205,700"}
+ {"date":"2026-04-20","sent_time":"10:23","writer":"김포근 메가마트 울산점","store":"울산 남목마트","time_start":"10:00","time_end":"19:00","item":"부추창펀","unit_price":5980,"qty":41,"amount":245180,"total":null,"flag":true,"raw":"부추창펀 41×5980=245,180"},
+ {"date":"2026-04-20","sent_time":"11:01","writer":"김정아 트레이더스 비산점 행사(고정)","store":"비산트레이더스","time_start":"11:00","time_end":"20:00","item":"들기름","unit_price":9480,"qty":30,"amount":null,"total":null,"flag":false,"raw":"들기름30봉 9480x30"}
 ]
-
-[예시 2 입력]
-[DATE: 2026-04-22] [WRITER: 김현우]
-이마트 동대구
-시간 10~19시
-행사결과
-A상품-1200*10=12000
-B상품-2500*4=9999
-총-21,999원
-
-[예시 2 출력]
-[
- {"date":"2026-04-22","writer":"김현우","store":"이마트 동대구","time_start":"10:00","time_end":"19:00","item":"A상품","unit_price":1200,"qty":10,"amount":12000,"total":null,"flag":false,"raw":"A상품-1200*10=12000"},
- {"date":"2026-04-22","writer":"김현우","store":"이마트 동대구","time_start":"10:00","time_end":"19:00","item":"B상품","unit_price":2500,"qty":4,"amount":9999,"total":21999,"flag":true,"raw":"B상품-2500*4=9999"}
-]
+(주의: writer는 [WRITER:] 헤더를 verbatim 사용 — "김정아"로 줄이지 말 것. sent_time은 [TIME:] 헤더 값.)
 `;
 
 function buildUserPrompt(inputText) {
   return SYSTEM_PROMPT + '\n[입력]\n' + inputText + '\n';
+}
+
+const RETRYABLE_GEMINI_STATUSES = new Set([429, 500, 502, 503, 504]);
+const GEMINI_RETRY_DELAYS = [1000, 2500, 5000];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getGeminiModelFallbacks(primaryModel) {
+  const fallbacks = {
+    'gemini-2.5-flash': 'gemini-2.5-flash-lite',
+    'gemini-2.0-flash': 'gemini-2.0-flash-lite'
+  };
+  const models = [primaryModel];
+  const fallback = fallbacks[primaryModel];
+  if (fallback && fallback !== primaryModel) models.push(fallback);
+  return models;
+}
+
+async function readGeminiError(res) {
+  let detail = '';
+  try { detail = await res.text(); } catch {}
+  let msg = detail;
+  try { const j = JSON.parse(detail); msg = j?.error?.message || detail; } catch {}
+  return msg || res.statusText || 'Unknown error';
+}
+
+function makeGeminiError(status, msg, model) {
+  let text;
+  if (status === 429) {
+    text = `429 rate limit/quota: ${msg.slice(0, 300)}`;
+  } else if (status === 400) {
+    text = `400: ${msg.slice(0, 300)}`;
+  } else if (status === 403) {
+    text = `403 permission/API key error: ${msg.slice(0, 300)}`;
+  } else if (status === 503) {
+    text = `Gemini 503: ${model} is temporarily overloaded. The app retried and tried a Lite fallback when available. Please try again later. (${msg.slice(0, 180)})`;
+  } else {
+    text = `Gemini ${status}: ${msg.slice(0, 300)}`;
+  }
+  const err = new Error(text);
+  err.status = status;
+  err.model = model;
+  err.retryable = RETRYABLE_GEMINI_STATUSES.has(status);
+  return err;
+}
+
+async function fetchGeminiJson(apiKey, model, body) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const msg = await readGeminiError(res);
+    throw makeGeminiError(res.status, msg, model);
+  }
+  return res.json();
 }
 
 async function callGemini(apiKey, userText, images = []) {
@@ -279,15 +393,35 @@ async function callGemini(apiKey, userText, images = []) {
     generationConfig: {
       responseMimeType: 'application/json',
       temperature: 0.1,
-      maxOutputTokens: 8192
+      maxOutputTokens: 16384,
+      thinkingConfig: { thinkingBudget: 0 }
     }
   };
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cache.model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  let geminiData;
+  let lastError;
+  const modelsToTry = getGeminiModelFallbacks(cache.model);
+  for (const model of modelsToTry) {
+    for (let attempt = 0; attempt < GEMINI_RETRY_DELAYS.length; attempt++) {
+      try {
+        geminiData = await fetchGeminiJson(apiKey, model, body);
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        if (!e.retryable || attempt === GEMINI_RETRY_DELAYS.length - 1) break;
+        await sleep(GEMINI_RETRY_DELAYS[attempt]);
+      }
+    }
+    if (geminiData) break;
+    if (!lastError?.retryable) break;
+  }
+  const res = {
+    ok: true,
+    json: async () => {
+      if (!geminiData) throw (lastError || new Error('Gemini request failed'));
+      return geminiData;
+    }
+  };
   if (!res.ok) {
     let detail = '';
     try { detail = await res.text(); } catch {}
@@ -367,16 +501,19 @@ function setStep(key, state, detail) {
 let currentRows = [];
 
 const COLUMNS = [
-  { key: 'date',       label: '날짜',   type: 'text',  align: 'left'  },
-  { key: 'writer',     label: '작성자', type: 'text',  align: 'left'  },
-  { key: 'store',      label: '지점',   type: 'text',  align: 'left'  },
-  { key: 'time_start', label: '시작',   type: 'text',  align: 'left'  },
-  { key: 'time_end',   label: '종료',   type: 'text',  align: 'left'  },
-  { key: 'item',       label: '품목',   type: 'text',  align: 'left'  },
-  { key: 'unit_price', label: '단가',   type: 'int',   align: 'right' },
-  { key: 'qty',        label: '수량',   type: 'int',   align: 'right' },
-  { key: 'amount',     label: '금액',   type: 'int',   align: 'right' },
-  { key: 'total',      label: '합계',   type: 'int',   align: 'right' },
+  { key: 'date',             label: '날짜',       type: 'text', align: 'left'  },
+  { key: 'sent_time',        label: '전송시간',   type: 'text', align: 'left'  },
+  { key: 'writer',           label: '작성자',     type: 'text', align: 'left'  },
+  { key: 'store',            label: '지점',       type: 'text', align: 'left'  },
+  { key: 'time_start',       label: '시작',       type: 'text', align: 'left'  },
+  { key: 'time_end',         label: '종료',       type: 'text', align: 'left'  },
+  { key: 'item',             label: '품목',       type: 'text', align: 'left'  },
+  { key: 'unit_price',       label: '단가',       type: 'int',  align: 'right' },
+  { key: 'qty',              label: '수량',       type: 'int',  align: 'right' },
+  { key: 'amount',           label: '금액',       type: 'int',  align: 'right' },
+  { key: 'amount_corrected', label: 'AI정정금액', type: 'int',  align: 'right' },
+  { key: 'total',            label: '합계',       type: 'int',  align: 'right' },
+  { key: 'total_corrected',  label: 'AI정정합계', type: 'int',  align: 'right' },
 ];
 
 function renderTable() {
@@ -471,14 +608,15 @@ function startEdit(e) {
  * 6) 행 후처리
  * ========================================================================= */
 function normalizeRows(rows) {
-  return rows.map(r => {
-    const toIntOrNull = v => {
-      if (v === null || v === undefined || v === '') return null;
-      const n = Number(String(v).replace(/[, ]/g,''));
-      return Number.isFinite(n) ? Math.round(n) : null;
-    };
+  const toIntOrNull = v => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(String(v).replace(/[, ]/g,''));
+    return Number.isFinite(n) ? Math.round(n) : null;
+  };
+  const out = rows.map(r => {
     const o = {
       date: r.date ?? null,
+      sent_time: r.sent_time ?? null,
       writer: r.writer ?? null,
       store: r.store ?? null,
       time_start: r.time_start ?? null,
@@ -487,15 +625,110 @@ function normalizeRows(rows) {
       unit_price: toIntOrNull(r.unit_price),
       qty: toIntOrNull(r.qty),
       amount: toIntOrNull(r.amount),
+      amount_corrected: null,
       total: toIntOrNull(r.total),
+      total_corrected: null,
       flag: !!r.flag,
-      raw: r.raw ?? ''
+      raw: r.raw ?? '',
+      processed_at: r.processed_at ?? null
     };
     if (o.unit_price != null && o.qty != null && o.amount != null) {
       o.flag = (o.unit_price * o.qty) !== o.amount;
     }
     return o;
   });
+  // 방어적: 같은 블록에서 writer가 하나라도 있으면 null 행에 복사
+  // 블록 키: date|store|time_start|time_end|sent_time — 같은 매장·시간대라도 다른 카톡 메시지면 다른 블록
+  const blockKey = r => `${r.date || ''}|${r.store || ''}|${r.time_start || ''}|${r.time_end || ''}|${r.sent_time || ''}`;
+  const byBlock = new Map();
+  for (const r of out) {
+    const k = blockKey(r);
+    if (!byBlock.has(k)) byBlock.set(k, []);
+    byBlock.get(k).push(r);
+  }
+  for (const group of byBlock.values()) {
+    const found = group.find(r => r.writer && String(r.writer).trim());
+    if (!found) continue;
+    for (const r of group) if (!r.writer) r.writer = found.writer;
+  }
+  // AI 정정 금액: 품목 행에서 unit_price×qty ≠ amount면 재계산 값 기록 (일치하면 null)
+  for (const r of out) {
+    r.amount_corrected = null;
+    const hasItem = r.item !== null && r.item !== undefined && String(r.item).trim() !== '';
+    if (hasItem && r.unit_price != null && r.qty != null) {
+      const calc = r.unit_price * r.qty;
+      if (r.amount != null && calc !== r.amount) r.amount_corrected = calc;
+    }
+  }
+  // 블록별 합계 검증 + AI 정정 합계
+  for (const group of byBlock.values()) {
+    const itemRows = group.filter(r => r.item !== null && r.item !== undefined && String(r.item).trim() !== '');
+    const subtotal = group.find(r => (r.item === null || r.item === undefined || String(r.item).trim() === '') && r.total != null);
+    if (!subtotal) continue;
+    subtotal.total_corrected = null;
+    if (itemRows.length === 0) continue;
+    // 검증용: Σ(amount) — 모든 품목에 amount 있을 때만
+    if (itemRows.every(r => r.amount != null)) {
+      const sumAmt = itemRows.reduce((s, r) => s + r.amount, 0);
+      if (sumAmt !== subtotal.total) subtotal.flag = true;
+    }
+    // 정정용: Σ(unit_price × qty) — 단가·수량 있는 품목만 부분 합산 (일부 누락이어도 가능)
+    const calcable = itemRows.filter(r => r.unit_price != null && r.qty != null);
+    if (calcable.length > 0) {
+      const sumCalc = calcable.reduce((s, r) => s + (r.unit_price * r.qty), 0);
+      if (sumCalc !== subtotal.total) subtotal.total_corrected = sumCalc;
+    }
+  }
+  // 최종 정렬: 날짜 → 전송시간 → 원래 순서 (안정 정렬로 블록 내 품목→소계 순서 유지)
+  out.forEach((r, i) => r._idx = i);
+  out.sort((a, b) => {
+    const dA = a.date || '';
+    const dB = b.date || '';
+    if (dA !== dB) return dA < dB ? -1 : 1;
+    const tA = a.sent_time || '';
+    const tB = b.sent_time || '';
+    if (tA !== tB) return tA < tB ? -1 : 1;
+    return a._idx - b._idx;
+  });
+  out.forEach(r => delete r._idx);
+
+  // 하루 단위 총합 행을 각 날짜 섹션 끝에 삽입
+  // 총합 = Σ(소계의 total) / AI정정총합 = Σ(소계.total_corrected ?? total)
+  const isSubtotal = r => (r.item === null || r.item === undefined || String(r.item).trim() === '') && r.total != null;
+  const final = [];
+  let curDate = undefined;
+  let curStart = 0;
+  const flushDaily = (endExclusive) => {
+    if (curDate == null) return;
+    const slice = out.slice(curStart, endExclusive);
+    const subtotals = slice.filter(isSubtotal);
+    if (subtotals.length === 0) return;
+    const sumOrig = subtotals.reduce((s, r) => s + (r.total || 0), 0);
+    const sumCorr = subtotals.reduce((s, r) => s + (r.total_corrected != null ? r.total_corrected : (r.total || 0)), 0);
+    final.push({
+      date: curDate,
+      sent_time: null, writer: null, store: null,
+      time_start: null, time_end: null,
+      item: '📊 일일 총합',
+      unit_price: null, qty: null, amount: null, amount_corrected: null,
+      total: sumOrig,
+      total_corrected: (sumOrig !== sumCorr) ? sumCorr : null,
+      flag: sumOrig !== sumCorr,
+      raw: '일일 총합',
+      processed_at: null
+    });
+  };
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i];
+    if (r.date !== curDate) {
+      flushDaily(i);
+      curDate = r.date;
+      curStart = i;
+    }
+    final.push(r);
+  }
+  flushDaily(out.length);
+  return final;
 }
 
 /* =========================================================================
@@ -601,20 +834,23 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     setStep('filter', 'done', `${filtered.length}건`);
     setProgress(25);
 
-    // 보고형 필터 + 해시 중복 제거
+    // 보고형 필터 + 해시 중복 제거 (명시적 날짜/기간 선택 시 중복검사 우회)
     setStep('dedupe', 'current');
     const candidates = filtered.filter(m => looksLikeReport(m.body));
     const prevHashes = new Set(cache.processedHashes);
     const hashed = candidates.map(m => ({ msg: m, hash: messageHash(m) }));
-    const fresh = hashed.filter(x => !prevHashes.has(x.hash));
+    const explicitPick = (mode === 'pickDate' || mode === 'custom');
+    const fresh = explicitPick ? hashed : hashed.filter(x => !prevHashes.has(x.hash));
     const dupCount = hashed.length - fresh.length;
-    setStep('dedupe', 'done', `신규 ${fresh.length} / 중복 ${dupCount}`);
+    setStep('dedupe', 'done',
+      explicitPick ? `특정 날짜 모드: 중복검사 건너뜀 (${fresh.length}건)`
+                   : `신규 ${fresh.length} / 중복 ${dupCount}`);
     setProgress(35);
 
     document.getElementById('txtPreview').classList.remove('hidden');
     document.getElementById('txtPreview').innerHTML = `
       <div><b>파일</b>: ${escapeHtml(selectedFile.name)}</div>
-      <div><b>대상</b>: 전체 ${msgs.length} / 범위내 ${filtered.length} / 보고형 ${candidates.length} / 신규 ${fresh.length} / 중복 ${dupCount}</div>
+      <div><b>대상</b>: 전체 ${msgs.length} / 범위내 ${filtered.length} / 보고형 ${candidates.length} / 처리 ${fresh.length}${explicitPick ? ' <span class="text-amber-600">(특정 날짜 · 중복검사 OFF)</span>' : ` / 중복 ${dupCount}`}</div>
     `;
 
     if (!fresh.length) {
@@ -622,13 +858,20 @@ document.getElementById('runTxt').addEventListener('click', async () => {
       setStep('excel', 'done', '스킵');
       setProgress(100);
       setTimeout(hideProgress, 800);
-      toast(`신규 0건 (중복 ${dupCount}건)`, 'info');
+      if (candidates.length === 0) {
+        toast(`선택한 범위 안에 보고 형태의 메시지가 없습니다 (범위내 ${filtered.length}건)`, 'err', 5000);
+      } else if (!explicitPick && dupCount > 0) {
+        toast(`전부 이미 처리됨 (${dupCount}건). 강제로 다시 처리하려면 "특정 날짜" 또는 "기간 지정"으로 선택하세요.`, 'err', 6000);
+      } else {
+        toast(`처리할 항목이 없습니다`, 'err', 4000);
+      }
       return;
     }
 
     // AI 정형화 배치
     setStep('ai', 'current', `0/${fresh.length}`);
     const BATCH = 15;
+    const runStamp = nowTimestamp();
     const allRows = [];
     const newHashes = [];
     for (let i = 0; i < fresh.length; i += BATCH) {
@@ -638,7 +881,9 @@ document.getElementById('runTxt').addEventListener('click', async () => {
         return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
       }).join('\n\n---\n\n');
       const rows = await callGemini(cache.activeKeyValue, combined);
-      allRows.push(...normalizeRows(rows));
+      const normalized = normalizeRows(rows);
+      normalized.forEach(r => r.processed_at = runStamp);
+      allRows.push(...normalized);
       newHashes.push(...slice.map(x => x.hash));
       const doneCount = Math.min(i + BATCH, fresh.length);
       setStep('ai', 'current', `${doneCount}/${fresh.length}`);
@@ -650,26 +895,37 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     currentRows = allRows;
     renderTable();
 
-    // 해시 저장
-    cache.processedHashes = Array.from(new Set([...cache.processedHashes, ...newHashes]));
-    await kapi.store.set('processedHashes', cache.processedHashes);
-    const maxDate = fresh.reduce((acc, x) => (x.msg.date > acc ? x.msg.date : acc), lastDate || '0000-00-00');
-    cache.lastProcessedDate = maxDate;
-    await kapi.store.set('lastProcessedDate', maxDate);
-
-    // 누적 엑셀에 즉시 append
+    // 누적 엑셀에 먼저 append 시도 (해시/마지막날짜 업데이트는 엑셀 성공 시에만)
     setStep('excel', 'current');
+    let excelOk = false;
+    let excelPending = false;
     if (cache.excelOutputPath) {
       const res = await kapi.excel.appendRows(allRows, cache.excelOutputPath);
-      if (!res.ok) throw new Error('엑셀 저장 실패: ' + res.error);
-      // 누적 캐시/카운트 업데이트
-      cache.accumulatedRows = cache.accumulatedRows.concat(allRows);
-      await kapi.store.set('accumulatedRows', cache.accumulatedRows);
-      cache.totalCount += allRows.length;
-      await kapi.store.set('totalCount', cache.totalCount);
-      setStep('excel', 'done', `${allRows.length}행 append`);
+      if (res.ok) {
+        excelOk = true;
+        cache.accumulatedRows = cache.accumulatedRows.concat(allRows);
+        await kapi.store.set('accumulatedRows', cache.accumulatedRows);
+        cache.totalCount += allRows.length;
+        await kapi.store.set('totalCount', cache.totalCount);
+        setStep('excel', 'done', `${allRows.length}행 append`);
+      } else if (res.code === 'EBUSY' || res.code === 'EPERM' || res.code === 'EACCES') {
+        excelPending = true;
+        setStep('excel', 'done', '엑셀 열림 - 대기');
+        toast('⚠ 엑셀이 열려있어 저장 불가. Excel을 닫은 뒤 결과 영역의 "📥 누적 파일에 추가" 버튼을 눌러 저장하세요.', 'err', 10000);
+      } else {
+        throw new Error('엑셀 저장 실패: ' + res.error);
+      }
     } else {
       setStep('excel', 'done', '경로 미설정 - 스킵');
+    }
+
+    // 해시/마지막날짜는 엑셀 성공(또는 경로 미설정)일 때만 업데이트
+    if (!excelPending) {
+      cache.processedHashes = Array.from(new Set([...cache.processedHashes, ...newHashes]));
+      await kapi.store.set('processedHashes', cache.processedHashes);
+      const maxDate = fresh.reduce((acc, x) => (x.msg.date > acc ? x.msg.date : acc), lastDate || '0000-00-00');
+      cache.lastProcessedDate = maxDate;
+      await kapi.store.set('lastProcessedDate', maxDate);
     }
     setProgress(95);
 
@@ -702,11 +958,9 @@ document.getElementById('runPaste').addEventListener('click', async () => {
   const text = document.getElementById('pasteText').value.trim();
   if (!text) { toast('붙여넣은 내용이 없습니다', 'err'); return; }
   const date = document.getElementById('pasteDate').value || todayYMD();
-  const writer = document.getElementById('pasteWriter').value.trim();
   cache.draftText = text;
   await kapi.store.set('draftText', text);
-  const header = `[DATE: ${date}]${writer ? ` [WRITER: ${writer}]` : ''}\n`;
-  const payload = header + text;
+  const payload = `[DATE: ${date}]\n` + text;
   try {
     showProgress();
     setStep('read', 'done', '텍스트 입력');
@@ -716,6 +970,8 @@ document.getElementById('runPaste').addEventListener('click', async () => {
     setProgress(40);
     const rows = await callGemini(cache.activeKeyValue, payload);
     currentRows = normalizeRows(rows);
+    const runStamp = nowTimestamp();
+    currentRows.forEach(r => r.processed_at = runStamp);
     renderTable();
     setStep('ai', 'done', `${currentRows.length}행`);
     setStep('excel', 'done', '수동 저장 대기');
@@ -755,12 +1011,15 @@ document.getElementById('runImg').addEventListener('click', async () => {
     setStep('filter', 'done', '-');
     setStep('dedupe', 'done', '-');
     setStep('ai', 'current', `0/${imgFiles.length}`);
+    const runStamp = nowTimestamp();
     for (let i = 0; i < imgFiles.length; i++) {
       const f = imgFiles[i];
       const b64 = await fileToBase64(f);
       const payload = `[DATE: ${date}]\n위 스크린샷(카카오톡 대화)에서 행사 보고 메시지를 읽어 스키마대로 정형화하라. 메시지 내 날짜가 있으면 그것을 우선한다.`;
       const rows = await callGemini(cache.activeKeyValue, payload, [{ mimeType: f.type || 'image/png', data: b64 }]);
-      allRows.push(...normalizeRows(rows));
+      const normalized = normalizeRows(rows);
+      normalized.forEach(r => r.processed_at = runStamp);
+      allRows.push(...normalized);
       setStep('ai', 'current', `${i+1}/${imgFiles.length}`);
       setProgress(20 + Math.round(((i+1) / imgFiles.length) * 70));
     }
@@ -793,7 +1052,14 @@ document.getElementById('saveAccumulate').addEventListener('click', async () => 
   if (!currentRows.length) { toast('저장할 행이 없습니다', 'err'); return; }
   if (!cache.excelOutputPath) { toast('설정에서 누적 엑셀 저장 경로를 지정하세요', 'err'); return; }
   const res = await kapi.excel.appendRows(currentRows, cache.excelOutputPath);
-  if (!res.ok) { toast('저장 실패: ' + res.error, 'err'); return; }
+  if (!res.ok) {
+    if (res.code === 'EBUSY' || res.code === 'EPERM' || res.code === 'EACCES') {
+      toast('⚠ 엑셀이 열려있어 저장 불가. Excel을 닫고 이 버튼을 다시 누르세요.', 'err', 8000);
+    } else {
+      toast('저장 실패: ' + res.error, 'err', 6000);
+    }
+    return;
+  }
   cache.accumulatedRows = cache.accumulatedRows.concat(currentRows);
   await kapi.store.set('accumulatedRows', cache.accumulatedRows);
   cache.totalCount += currentRows.length;
@@ -807,15 +1073,19 @@ document.getElementById('saveAccumulate').addEventListener('click', async () => 
   refreshStatusPanel();
 });
 
-document.getElementById('openExcel').addEventListener('click', async () => {
+async function doOpenExcel() {
   if (!cache.excelOutputPath) { toast('저장 경로 미설정', 'err'); return; }
   const res = await kapi.files.openPath(cache.excelOutputPath);
   if (!res.ok) toast('열기 실패: ' + res.error, 'err');
-});
-document.getElementById('showInFolder').addEventListener('click', async () => {
+}
+async function doShowInFolder() {
   if (!cache.excelOutputPath) { toast('저장 경로 미설정', 'err'); return; }
   await kapi.files.showInFolder(cache.excelOutputPath);
-});
+}
+document.getElementById('openExcel').addEventListener('click', doOpenExcel);
+document.getElementById('showInFolder').addEventListener('click', doShowInFolder);
+document.getElementById('openExcelDirect')?.addEventListener('click', doOpenExcel);
+document.getElementById('openExcelFolder')?.addEventListener('click', doShowInFolder);
 
 /* =========================================================================
  * 12) 설정 UI
@@ -933,6 +1203,8 @@ function renderPaths() {
   document.getElementById('autoCleanupDays').value = cache.autoCleanupDays;
   document.getElementById('autoLaunch').checked = cache.autoLaunch;
   document.getElementById('minimizeToTray').checked = cache.minimizeToTray;
+  const hint = document.getElementById('accumPathHint');
+  if (hint) hint.textContent = cache.excelOutputPath ? `→ ${cache.excelOutputPath}` : '(경로 미설정)';
 }
 
 document.getElementById('pickWatchFolder').addEventListener('click', async () => {
@@ -1036,6 +1308,12 @@ function refreshStatusPanel() {
   document.getElementById('statTotal').textContent = (cache.totalCount || 0).toLocaleString('ko-KR');
   document.getElementById('statLastDate').textContent = cache.lastProcessedDate || '-';
   document.getElementById('statHash').textContent = (cache.processedHashes.length || 0).toLocaleString('ko-KR');
+  const hint = document.getElementById('lastDateHint');
+  if (hint) {
+    hint.textContent = cache.lastProcessedDate
+      ? `${cache.lastProcessedDate} 이후만 처리`
+      : '처음 실행 · 전체 처리';
+  }
   updateApiKeyStatus();
 }
 
@@ -1080,20 +1358,40 @@ function setupUpdateUI() {
     else box.classList.add('bg-gray-50', 'border-gray-200');
   }
 
-  dismissBtn.addEventListener('click', () => banner.classList.add('hidden'));
+  let hideTimer = null;
+  function hideBanner() {
+    banner.classList.add('hidden');
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+  }
+  function autoHide(ms) {
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => { banner.classList.add('hidden'); hideTimer = null; }, ms);
+  }
+
+  dismissBtn.addEventListener('click', hideBanner);
 
   actionBtn.addEventListener('click', async () => {
     if (actionBtn.dataset.action === 'install') {
       if (!confirm('앱이 종료되고 새 버전으로 다시 시작됩니다. 계속할까요?')) return;
       await kapi.update.install();
+    } else if (actionBtn.dataset.action === 'logs') {
+      const r = await kapi.update.openLogs();
+      if (!r.ok) toast('로그 폴더 열기 실패: ' + (r.error || ''), 'err');
     }
   });
 
   kapi.update.onEvent('checking', () => {
-    // 조용히 (배너 안 띄움)
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    showBanner('info');
+    icon.textContent = '🔄';
+    title.textContent = '업데이트 확인 중...';
+    detail.textContent = 'GitHub 릴리스에서 최신 버전을 조회하고 있습니다';
+    progWrap.classList.add('hidden');
+    actionBtn.classList.add('hidden');
   });
 
   kapi.update.onEvent('available', (info) => {
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
     showBanner('info');
     icon.textContent = '⬇️';
     title.textContent = `새 버전 v${info.version} 다운로드 중...`;
@@ -1112,6 +1410,7 @@ function setupUpdateUI() {
   });
 
   kapi.update.onEvent('downloaded', (info) => {
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
     showBanner('ready');
     icon.textContent = '✅';
     title.textContent = `v${info.version} 준비 완료`;
@@ -1123,20 +1422,35 @@ function setupUpdateUI() {
     kapi.notify.toast('업데이트 준비 완료', `v${info.version} 지금 설치 가능`);
   });
 
-  kapi.update.onEvent('notAvailable', () => {
-    // 수동 체크였을 때만 토스트로 알림
-    if (banner.dataset.manualCheck === '1') {
-      banner.dataset.manualCheck = '';
-      toast('최신 버전입니다', 'ok');
-    }
+  kapi.update.onEvent('notAvailable', (info) => {
+    showBanner('info');
+    icon.textContent = '✅';
+    title.textContent = '최신 버전입니다';
+    detail.textContent = info && info.version ? `현재: v${info.version}` : '';
+    progWrap.classList.add('hidden');
+    actionBtn.classList.add('hidden');
+    autoHide(5000);
   });
 
   kapi.update.onEvent('error', (e) => {
-    if (banner.dataset.manualCheck === '1') {
-      banner.dataset.manualCheck = '';
-      toast('업데이트 확인 실패: ' + e.message, 'err', 5000);
-    }
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    showBanner('error');
+    icon.textContent = '⚠️';
+    title.textContent = '업데이트 확인 실패';
+    detail.textContent = (e && e.message) ? e.message : '알 수 없는 오류';
+    progWrap.classList.add('hidden');
+    actionBtn.classList.remove('hidden');
+    actionBtn.dataset.action = 'logs';
+    actionBtn.textContent = '로그 열기';
     console.warn('[updater] error:', e);
+  });
+
+  // 헤더 "업데이트 확인" 버튼 (모달 바깥에서 바로 체크)
+  document.getElementById('btnHeaderCheck')?.addEventListener('click', async () => {
+    const res = await kapi.update.check();
+    if (!res.ok) {
+      // error 이벤트가 배너를 띄움 — 별도 처리 불필요
+    }
   });
 
   // 업데이트 내역 모달
@@ -1214,10 +1528,8 @@ function setupUpdateUI() {
   document.getElementById('btnCloseReleases').addEventListener('click', closeModal);
   modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
   document.getElementById('btnCheckUpdate').addEventListener('click', async () => {
-    banner.dataset.manualCheck = '1';
-    toast('업데이트 확인 중...', 'info');
-    const res = await kapi.update.check();
-    if (!res.ok) toast('확인 실패: ' + res.error, 'err');
+    await kapi.update.check();
+    // checking / notAvailable / error 이벤트가 배너로 결과 표시
   });
 }
 
@@ -1252,3 +1564,5 @@ A상품-1200*10=12000
 }
 
 init();
+
+})();

@@ -31,8 +31,16 @@
   .toast.info { background: #111827; color: #fff; }
   button, input[type=file], input[type=radio], input[type=date] { min-height: 40px; }
   .btn { min-height: 44px; }
-  details > summary { cursor: pointer; }
+  details > summary { cursor: pointer; user-select: none; }
   details > summary::-webkit-details-marker { display: none; }
+  details > summary::marker { display: none; content: ''; }
+  details > summary .chev {
+    display: inline-block; width: 14px; text-align: center;
+    transition: transform 0.18s ease;
+    color: #9ca3af; font-size: 12px;
+  }
+  details[open] > summary .chev { transform: rotate(90deg); color: #374151; }
+  details[open] > summary { border-bottom: 1px solid #e5e7eb; }
   .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table.result-table { min-width: 1100px; }
   .progress-bar {
@@ -61,6 +69,7 @@
       <span id="appVersion" class="text-xs text-gray-400"></span>
     </div>
     <div class="flex items-center gap-2">
+      <button id="btnHeaderCheck" class="text-xs text-blue-600 underline hover:text-blue-800">업데이트 확인</button>
       <button id="btnShowReleases" class="text-xs text-blue-600 underline hover:text-blue-800">업데이트 내역</button>
       <span id="apiKeyStatus" class="text-xs text-gray-500"></span>
     </div>
@@ -102,51 +111,84 @@
 
 <main class="max-w-5xl mx-auto px-3 md:px-4 py-4 space-y-4">
 
-  <!-- 자동 감지 패널 (탭 B 확장) -->
+  <!-- 입력 (통합 3탭) -->
   <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 space-y-3">
-    <div class="flex items-center justify-between">
-      <h2 class="font-bold text-base">📂 카톡 파일</h2>
-      <button id="btnRefreshDetect" class="text-xs text-blue-600 underline">다시 감지</button>
+    <h2 class="font-bold text-base">📥 입력</h2>
+
+    <div class="grid grid-cols-3 gap-1 bg-gray-100 rounded-lg p-1">
+      <button data-tab="auto"  class="tab-btn active btn rounded-lg text-sm font-semibold transition">📂 자동 감지</button>
+      <button data-tab="paste" class="tab-btn        btn rounded-lg text-sm font-semibold transition">📋 텍스트</button>
+      <button data-tab="image" class="tab-btn        btn rounded-lg text-sm font-semibold transition">📷 스크린샷</button>
     </div>
 
-    <div class="space-y-1 text-sm">
-      <label class="flex items-center gap-2">
-        <input type="radio" name="fileSource" value="auto" checked> 자동 감지 (감시 폴더 최신 파일)
-      </label>
-      <label class="flex items-center gap-2">
-        <input type="radio" name="fileSource" value="manual"> 직접 선택
-      </label>
-    </div>
+    <!-- 자동 감지 -->
+    <section data-tab-content="auto" class="space-y-3">
+      <div class="space-y-1 text-sm">
+        <label class="flex items-center gap-2">
+          <input type="radio" name="fileSource" value="auto" checked> 자동 감지 (감시 폴더 최신 파일)
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" name="fileSource" value="manual"> 직접 선택
+        </label>
+      </div>
 
-    <div id="detectResult" class="text-sm bg-gray-50 rounded-lg p-3 min-h-[60px]">
-      <span class="text-gray-400">감지 중...</span>
-    </div>
-
-    <div class="flex flex-wrap gap-3 items-end border-t pt-3">
-      <div>
-        <label class="block text-xs text-gray-600 mb-1">📅 처리 범위</label>
-        <div class="flex flex-wrap gap-3 text-sm">
-          <label class="flex items-center gap-1"><input type="radio" name="rangeMode" value="today"> 오늘만</label>
-          <label class="flex items-center gap-1"><input type="radio" name="rangeMode" value="auto" checked> 최근 처리 이후 <span class="text-xs text-gray-500">(권장)</span></label>
-          <label class="flex items-center gap-1"><input type="radio" name="rangeMode" value="pickDate"> 특정 날짜</label>
-          <label class="flex items-center gap-1"><input type="radio" name="rangeMode" value="custom"> 기간 지정</label>
+      <div class="flex items-stretch gap-2">
+        <div id="detectResult" class="flex-1 text-sm bg-gray-50 rounded-lg p-3 min-h-[60px]">
+          <span class="text-gray-400">감지 중...</span>
         </div>
-        <div id="pickDateRow" class="mt-2 hidden">
-          <input type="date" id="rangePickOne" class="border rounded-lg px-3 py-2 text-sm">
-        </div>
-        <div id="customRange" class="mt-2 hidden flex flex-wrap gap-2 items-end">
-          <div><label class="block text-xs text-gray-600">시작</label><input type="date" id="rangeFrom" class="border rounded-lg px-3 py-2 text-sm"></div>
-          <div><label class="block text-xs text-gray-600">종료</label><input type="date" id="rangeTo" class="border rounded-lg px-3 py-2 text-sm"></div>
+        <button id="btnRefreshDetect" class="btn px-3 rounded-lg bg-gray-200 text-gray-800 text-xs whitespace-nowrap self-stretch">🔄 다시 감지</button>
+      </div>
+
+      <div class="flex flex-wrap gap-3 items-end border-t pt-3">
+        <div class="w-full">
+          <label class="block text-xs text-gray-600 mb-1">📅 처리 범위</label>
+          <div class="space-y-1 text-sm">
+            <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="today" class="mt-0.5"> <span><span class="font-semibold">오늘만</span> <span class="text-xs text-gray-500">— 오늘 날짜로 찍힌 메시지만</span></span></label>
+            <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="auto" checked class="mt-0.5"> <span><span class="font-semibold">마지막 처리일 이후</span> <span class="text-xs text-gray-500">(권장 · 증분) — <span id="lastDateHint" class="text-gray-700">처음 실행</span></span></span></label>
+            <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="pickDate" class="mt-0.5"> <span><span class="font-semibold">특정 날짜</span> <span class="text-xs text-gray-500">— 날짜 하나 선택해 재처리 (중복검사 OFF)</span></span></label>
+            <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="custom" class="mt-0.5"> <span><span class="font-semibold">기간 지정</span> <span class="text-xs text-gray-500">— 시작~종료 범위 재처리 (중복검사 OFF)</span></span></label>
+          </div>
+          <div id="pickDateRow" class="mt-2 hidden">
+            <input type="date" id="rangePickOne" class="border rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div id="customRange" class="mt-2 hidden flex flex-wrap gap-2 items-end">
+            <div><label class="block text-xs text-gray-600">시작</label><input type="date" id="rangeFrom" class="border rounded-lg px-3 py-2 text-sm"></div>
+            <div><label class="block text-xs text-gray-600">종료</label><input type="date" id="rangeTo" class="border rounded-lg px-3 py-2 text-sm"></div>
+          </div>
         </div>
       </div>
-    </div>
 
-    <div id="txtPreview" class="text-sm text-gray-700 bg-gray-50 rounded-lg p-3 hidden"></div>
+      <div id="txtPreview" class="text-sm text-gray-700 bg-gray-50 rounded-lg p-3 hidden"></div>
 
-    <button id="runTxt" class="btn w-full px-6 rounded-lg font-bold text-black text-base" style="background: var(--kakao)">🚀 추출 실행</button>
+      <button id="runTxt" class="btn w-full px-6 rounded-lg font-bold text-black text-base" style="background: var(--kakao)">🚀 추출 실행</button>
+    </section>
+
+    <!-- 텍스트 -->
+    <section data-tab-content="paste" class="hidden space-y-3">
+      <textarea id="pasteText" rows="8" class="w-full border rounded-lg p-3 text-sm" placeholder="카톡 대화창에서 복사한 내용을 붙여넣으세요. 작성자 이름은 원문에서 자동 추출합니다."></textarea>
+      <div class="flex flex-wrap gap-3 items-end">
+        <div>
+          <label class="block text-xs text-gray-600 mb-1">기준 날짜</label>
+          <input type="date" id="pasteDate" class="border rounded-lg px-3 py-2 text-sm">
+        </div>
+      </div>
+      <button id="runPaste" class="btn w-full px-6 rounded-lg font-bold text-black text-base" style="background: var(--kakao)">🚀 텍스트로 실행</button>
+    </section>
+
+    <!-- 스크린샷 -->
+    <section data-tab-content="image" class="hidden space-y-3">
+      <input type="file" id="imgFile" accept="image/*" multiple class="block w-full text-sm border rounded-lg p-2">
+      <p class="text-xs text-gray-500">여러 장 선택 가능. 순차 처리 후 병합됩니다.</p>
+      <div id="imgList" class="flex flex-wrap gap-2"></div>
+      <div>
+        <label class="block text-xs text-gray-600 mb-1">날짜</label>
+        <input type="date" id="imgDate" class="border rounded-lg px-3 py-2 text-sm">
+      </div>
+      <button id="runImg" class="btn w-full px-6 rounded-lg font-bold text-black text-base" style="background: var(--kakao)">🚀 이미지로 실행</button>
+    </section>
   </section>
 
-  <!-- 진행률 패널 -->
+  <!-- 진행률 -->
   <section id="progressPanel" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 p-4 space-y-2">
     <div class="flex items-center gap-3">
       <div class="spinner"></div>
@@ -163,50 +205,6 @@
     </div>
   </section>
 
-  <!-- 추가 입력: 텍스트 붙여넣기 / 스크린샷 (접어둠) -->
-  <section class="bg-white rounded-xl shadow-sm border border-gray-200">
-    <details>
-      <summary class="p-4 font-semibold flex items-center justify-between">
-        <span>📋 다른 입력 방식</span>
-        <span class="text-xs text-gray-500">텍스트 붙여넣기 · 스크린샷</span>
-      </summary>
-      <div class="px-4 pb-4 space-y-4">
-
-        <div class="grid grid-cols-2 gap-1 bg-gray-100 rounded-lg p-1">
-          <button data-tab="A" class="tab-btn active btn rounded-lg text-sm font-semibold transition">📋 텍스트</button>
-          <button data-tab="C" class="tab-btn btn rounded-lg text-sm font-semibold transition">📷 스크린샷</button>
-        </div>
-
-        <section data-tab-content="A" class="space-y-3">
-          <textarea id="pasteText" rows="8" class="w-full border rounded-lg p-3 text-sm" placeholder="카톡 대화창에서 복사한 내용을 붙여넣으세요."></textarea>
-          <div class="flex flex-wrap gap-3 items-end">
-            <div>
-              <label class="block text-xs text-gray-600 mb-1">날짜</label>
-              <input type="date" id="pasteDate" class="border rounded-lg px-3 py-2 text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-gray-600 mb-1">작성자 (선택)</label>
-              <input type="text" id="pasteWriter" class="border rounded-lg px-3 py-2 text-sm" placeholder="비워두면 원문에서 추출">
-            </div>
-          </div>
-          <button id="runPaste" class="btn w-full md:w-auto px-6 rounded-lg font-bold text-black" style="background: var(--kakao)">텍스트로 실행</button>
-        </section>
-
-        <section data-tab-content="C" class="hidden space-y-3">
-          <input type="file" id="imgFile" accept="image/*" multiple class="block w-full text-sm border rounded-lg p-2">
-          <p class="text-xs text-gray-500">여러 장 선택 가능. 순차 처리 후 병합됩니다.</p>
-          <div id="imgList" class="flex flex-wrap gap-2"></div>
-          <div>
-            <label class="block text-xs text-gray-600 mb-1">날짜</label>
-            <input type="date" id="imgDate" class="border rounded-lg px-3 py-2 text-sm">
-          </div>
-          <button id="runImg" class="btn w-full md:w-auto px-6 rounded-lg font-bold text-black" style="background: var(--kakao)">이미지로 실행</button>
-        </section>
-
-      </div>
-    </details>
-  </section>
-
   <!-- 결과 -->
   <section id="resultPanel" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 p-4 space-y-3">
     <div class="flex flex-wrap items-center justify-between gap-2">
@@ -214,17 +212,27 @@
         <h2 class="font-bold">결과</h2>
         <p id="resultSummary" class="text-xs text-gray-500"></p>
       </div>
-      <div class="flex gap-2 flex-wrap">
-        <button id="saveAccumulate" class="btn px-3 rounded-lg bg-gray-900 text-white text-sm">누적 엑셀에 추가</button>
-        <button id="downloadCurrent" class="btn px-3 rounded-lg text-black text-sm font-semibold" style="background: var(--kakao)">단건 엑셀 저장</button>
+      <div class="flex gap-2 flex-wrap items-center">
+        <button id="saveAccumulate" class="btn px-5 rounded-lg font-bold text-black text-sm" style="background: var(--kakao)" title="설정에서 지정한 하나의 누적 파일에 이 행들을 이어붙입니다 (메인 사용 흐름)">📥 누적 파일에 추가</button>
+        <button id="downloadCurrent" class="btn px-3 rounded-lg bg-gray-200 text-gray-800 text-sm" title="이번 결과만 별도 파일로 한 번 저장 (백업/공유용)">📤 별도 파일로 저장</button>
+        <button id="openExcelFolder" class="btn px-3 rounded-lg bg-gray-900 text-white text-sm" title="누적 파일이 있는 폴더를 파일 탐색기로 열기">📂 폴더 열기</button>
+        <button id="openExcelDirect" class="btn px-3 rounded-lg bg-gray-700 text-white text-sm" title="누적 파일을 Excel로 바로 열기">📗 엑셀 열기</button>
       </div>
     </div>
+    <p class="text-xs text-gray-500">
+      <span class="font-semibold">누적 파일</span>에 추가하면 같은 엑셀에 계속 쌓입니다.
+      <span id="accumPathHint" class="text-gray-400"></span>
+    </p>
+    <p class="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-relaxed">
+      💡 <span class="font-semibold">검증오류 X</span> — 품목 행: 원문의 "단가 × 수량"이 금액과 불일치 / 소계 행: Σ금액과 작성자가 쓴 합계가 불일치 (작성자의 계산 오기 가능성). <span class="font-semibold">공란</span> = 일치 또는 값 부족으로 검증 불가(대충 올린 경우 자동 패싱). <span class="font-semibold">소계 행</span>은 블록별 합계입니다.
+    </p>
     <div class="scroll-x border rounded-lg">
       <table class="result-table w-full text-xs" id="resultTable">
         <thead class="bg-gray-100 text-gray-700">
           <tr>
             <th class="p-2 text-left">#</th>
             <th class="p-2 text-left">날짜</th>
+            <th class="p-2 text-left">전송시간</th>
             <th class="p-2 text-left">작성자</th>
             <th class="p-2 text-left">지점</th>
             <th class="p-2 text-left">시작</th>
@@ -233,9 +241,12 @@
             <th class="p-2 text-right">단가</th>
             <th class="p-2 text-right">수량</th>
             <th class="p-2 text-right">금액</th>
+            <th class="p-2 text-right bg-amber-100" title="단가×수량으로 재계산한 값. 원본 금액과 다를 때만 표시">AI정정금액</th>
             <th class="p-2 text-right">합계</th>
+            <th class="p-2 text-right bg-amber-100" title="Σ(단가×수량). 작성자가 쓴 합계와 다를 때만 표시">AI정정합계</th>
             <th class="p-2 text-center">오류</th>
             <th class="p-2 text-left">원본</th>
+            <th class="p-2 text-left">처리일시</th>
             <th class="p-2"></th>
           </tr>
         </thead>
@@ -244,27 +255,28 @@
     </div>
   </section>
 
-  <!-- 처리 현황 -->
-  <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-    <h2 class="font-bold mb-2">📈 처리 현황</h2>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
-      <div class="bg-gray-50 rounded p-2"><div class="text-xs text-gray-500">누적 행 수</div><div id="statAccum" class="font-bold">-</div></div>
-      <div class="bg-gray-50 rounded p-2"><div class="text-xs text-gray-500">처리 총 건</div><div id="statTotal" class="font-bold">-</div></div>
-      <div class="bg-gray-50 rounded p-2"><div class="text-xs text-gray-500">마지막 처리일</div><div id="statLastDate" class="font-bold">-</div></div>
-      <div class="bg-gray-50 rounded p-2"><div class="text-xs text-gray-500">누적 해시</div><div id="statHash" class="font-bold">-</div></div>
-    </div>
-    <div class="mt-3 flex flex-wrap gap-2">
-      <button id="openExcel" class="btn px-3 rounded-lg bg-gray-900 text-white text-sm">📂 누적 엑셀 열기</button>
-      <button id="showInFolder" class="btn px-3 rounded-lg bg-gray-200 text-gray-900 text-sm">폴더에서 보기</button>
+  <!-- 처리 현황 (compact, always visible) -->
+  <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-3">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+      <div class="font-semibold text-gray-700">📈 누적</div>
+      <div><span class="text-xs text-gray-500">행</span> <span id="statAccum" class="font-bold">-</span></div>
+      <div><span class="text-xs text-gray-500">총 건</span> <span id="statTotal" class="font-bold">-</span></div>
+      <div><span class="text-xs text-gray-500">마지막</span> <span id="statLastDate" class="font-bold">-</span></div>
+      <div><span class="text-xs text-gray-500">해시</span> <span id="statHash" class="font-bold">-</span></div>
+      <div class="ml-auto flex gap-2">
+        <button id="openExcel" class="btn px-3 rounded-lg bg-gray-900 text-white text-xs">엑셀 열기</button>
+        <button id="showInFolder" class="btn px-3 rounded-lg bg-gray-200 text-gray-900 text-xs">폴더</button>
+      </div>
     </div>
   </section>
 
   <!-- 설정 -->
   <section class="bg-white rounded-xl shadow-sm border border-gray-200">
     <details>
-      <summary class="p-4 font-semibold flex items-center justify-between">
+      <summary class="p-4 font-semibold flex items-center gap-2">
+        <span class="chev">▶</span>
         <span>⚙️ 설정</span>
-        <span class="text-xs text-gray-500">API · 경로 · 아카이브</span>
+        <span class="text-xs text-gray-500 ml-auto">API · 경로 · 아카이브 · 데이터</span>
       </summary>
       <div class="px-4 pb-4 space-y-6">
 
