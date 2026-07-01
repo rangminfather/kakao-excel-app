@@ -1050,13 +1050,50 @@ function parseReportLocal(msg) {
   return { rows, unresolved: rows.length === 0 };
 }
 
+function shouldAskAiForReport(msg) {
+  const body = String(msg?.body || '');
+  if (!body.trim()) return false;
+  if (/사진|동영상|이모티콘|Voice Note/.test(body) && body.trim().length < 20) return false;
+  const hasMoney = /[\d,.]{3,}\s*(원|$)/m.test(body);
+  const hasCalc = /[0-9][\d,.]*\s*[xX×*횞]\s*[0-9]/.test(body);
+  const hasTotal = /(총|합계|소계|행사결과|결과|판매|금액|total)/i.test(body);
+  const hasQtyAmount = /[0-9]+\s*(개|봉|팩|박스|ea)?\s*[~\-]\s*[\d,.]{3,}/i.test(body);
+  return hasCalc || (hasMoney && hasTotal) || hasQtyAmount;
+}
+
+function makeReviewRow(item, reason) {
+  const m = item.msg || {};
+  return {
+    date: m.date || null,
+    sent_time: m.time || null,
+    writer: m.writer || null,
+    store: null,
+    time_start: null,
+    time_end: null,
+    item: null,
+    unit_price: null,
+    qty: null,
+    amount: null,
+    amount_corrected: null,
+    total: null,
+    total_corrected: null,
+    flag: true,
+    raw: `[${reason}] ${m.body || ''}`.slice(0, 2000),
+    source: 'review',
+    processed_at: null
+  };
+}
+
 async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
   const mode = cache.processMode || 'hybrid';
   const allRows = [];
   const localRawRows = [];
   const aiItems = [];
+  const reviewRows = [];
   let localCount = 0;
   let aiCount = 0;
+  let skippedCount = 0;
+  let reviewCount = 0;
   if (mode !== 'ai') {
     let scanned = 0;
     for (const item of items) {
@@ -1065,8 +1102,10 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
       if (parsed.rows.length) {
         localRawRows.push(...parsed.rows);
         localCount++;
-      } else if (mode === 'hybrid') {
+      } else if (mode === 'hybrid' && shouldAskAiForReport(item.msg)) {
         aiItems.push(item);
+      } else {
+        skippedCount++;
       }
       if (onProgress && (scanned % 50 === 0 || scanned === items.length)) {
         onProgress(localCount, aiCount, mode === 'hybrid' ? aiItems.length : 0, scanned, items.length);
@@ -1084,7 +1123,13 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
     allRows.push(...normalized);
   }
   if (aiItems.length > 0) {
-    if (!apiKey) throw new Error('Gemini API Key is required for hybrid/AI processing');
+    if (!apiKey) {
+      for (const item of aiItems) {
+        reviewRows.push(makeReviewRow(item, 'AI key missing'));
+        reviewCount++;
+      }
+      aiItems.length = 0;
+    }
     const BATCH = 15;
     for (let i = 0; i < aiItems.length; i += BATCH) {
       const slice = aiItems.slice(i, i + BATCH);
@@ -1092,18 +1137,29 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
         const m = x.msg;
         return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
       }).join('\n\n---\n\n');
-      const rows = await callGemini(apiKey, combined);
-      const normalized = normalizeRows(rows);
-      normalized.forEach(r => {
-        r.processed_at = runStamp;
-        r.source = 'gemini';
-      });
-      allRows.push(...normalized);
-      aiCount += slice.length;
+      try {
+        const rows = await callGemini(apiKey, combined);
+        const normalized = normalizeRows(rows);
+        normalized.forEach(r => {
+          r.processed_at = runStamp;
+          r.source = 'gemini';
+        });
+        allRows.push(...normalized);
+        aiCount += slice.length;
+      } catch (e) {
+        for (const item of slice) {
+          reviewRows.push(makeReviewRow(item, `AI failed: ${String(e.message || e).slice(0, 180)}`));
+          reviewCount++;
+        }
+      }
       if (onProgress) onProgress(localCount, aiCount, aiItems.length);
     }
   }
-  return { rows: allRows, localCount, aiCount, skippedCount: items.length - localCount - aiCount };
+  if (reviewRows.length > 0) {
+    reviewRows.forEach(r => r.processed_at = runStamp);
+    allRows.push(...reviewRows);
+  }
+  return { rows: allRows, localCount, aiCount, skippedCount, reviewCount };
 }
 
 /* =========================================================================
@@ -1256,7 +1312,7 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     });
     const allRows = processed.rows;
     newHashes.push(...fresh.map(x => x.hash));
-    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / skip ${processed.skippedCount}`);
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
     setProgress(85);
 
     currentRows = allRows;
@@ -1342,7 +1398,7 @@ document.getElementById('runPaste').addEventListener('click', async () => {
     const processed = await processItemsWithMode([item], cache.activeKeyValue, runStamp);
     currentRows = processed.rows;
     renderTable();
-    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / skip ${processed.skippedCount}`);
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
     setStep('excel', 'done', '수동 저장 대기');
     setProgress(100);
     setTimeout(hideProgress, 600);
