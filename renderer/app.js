@@ -677,11 +677,13 @@ function normalizeRows(rows) {
       flag: !!r.flag,
       raw: r.raw ?? '',
       source: r.source ?? null,
-      processed_at: r.processed_at ?? null
+      processed_at: r.processed_at ?? null,
+      ambiguous: !!r.ambiguous
     };
-    if (o.unit_price != null && o.qty != null && o.amount != null) {
+    if (!o.ambiguous && o.unit_price != null && o.qty != null && o.amount != null) {
       o.flag = (o.unit_price * o.qty) !== o.amount;
     }
+    if (o.ambiguous) o.flag = true;
     return o;
   });
   // 방어적: 같은 블록에서 writer가 하나라도 있으면 null 행에 복사
@@ -702,7 +704,7 @@ function normalizeRows(rows) {
   for (const r of out) {
     r.amount_corrected = null;
     const hasItem = r.item !== null && r.item !== undefined && String(r.item).trim() !== '';
-    if (hasItem && r.unit_price != null && r.qty != null) {
+    if (!r.ambiguous && hasItem && r.unit_price != null && r.qty != null) {
       const calc = r.unit_price * r.qty;
       if (r.amount != null && calc !== r.amount) r.amount_corrected = calc;
     }
@@ -720,7 +722,8 @@ function normalizeRows(rows) {
       if (sumAmt !== subtotal.total) subtotal.flag = true;
     }
     // 정정용: Σ(unit_price × qty) — 단가·수량 있는 품목만 부분 합산 (일부 누락이어도 가능)
-    const calcable = itemRows.filter(r => r.unit_price != null && r.qty != null);
+    if (itemRows.some(r => r.ambiguous)) continue;
+    const calcable = itemRows.filter(r => !r.ambiguous && r.unit_price != null && r.qty != null);
     if (calcable.length > 0) {
       const sumCalc = calcable.reduce((s, r) => s + (r.unit_price * r.qty), 0);
       if (sumCalc !== subtotal.total) subtotal.total_corrected = sumCalc;
@@ -786,6 +789,11 @@ function parseMoneyLike(text) {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
+function parseLocalNumberToken(v) {
+  const n = Number(String(v || '').replace(/[,.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseTimeRangeLocal(text) {
   const src = String(text || '');
   let m = src.match(/(\d{1,2})\s*(?:시)?\s*[~\-]\s*(\d{1,2})\s*(?:시)?/);
@@ -816,6 +824,22 @@ function parseItemLineLocal(line, fallbackItem) {
   const text = String(line || '').trim();
   if (!text || looksLikeTotalLine(text)) return null;
   const mul = '[xX×*횞]';
+  const rangeRe = new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*[~\\-]\\s*([0-9][\\d,.]{1,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})?(?:\\s*(?:\\uAC1C|\\uBD09|\\uD329|\\uBC15\\uC2A4|ea))?\\s*=?\\s*([0-9][\\d,.]{2,})?$`);
+  const rangeMatch = text.match(rangeRe);
+  if (rangeMatch) {
+    const qty = rangeMatch[4] ? parseLocalNumberToken(rangeMatch[4]) : null;
+    const amount = rangeMatch[5] ? parseLocalNumberToken(rangeMatch[5]) : null;
+    return {
+      item: cleanLocalItemName(rangeMatch[1]) || fallbackItem || null,
+      unit_price: null,
+      qty,
+      amount,
+      raw: text,
+      ambiguous: true,
+      needsQtyAmount: qty == null,
+      needsAmount: qty != null && amount == null
+    };
+  }
   const patterns = [
     new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`),
     new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{0,5})\\s*(?:개|봉|팩|박스|ea)?\\s*${mul}\\s*([0-9][\\d,.]{1,7})(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`)
@@ -941,6 +965,19 @@ function parseReportLocal(msg) {
   let total = null;
   const rows = [];
   for (const line of lines) {
+    if (pendingCalcRow && pendingCalcRow.needsQtyAmount) {
+      const qtyAmount = String(line || '').trim().match(/^([0-9][\d,.]{0,5})\s*=\s*([0-9][\d,.]{2,})$/);
+      if (qtyAmount) {
+        pendingCalcRow.qty = parseLocalNumberToken(qtyAmount[1]);
+        pendingCalcRow.amount = parseLocalNumberToken(qtyAmount[2]);
+        pendingCalcRow.raw = `${pendingCalcRow.raw} ${line}`;
+        delete pendingCalcRow.needsQtyAmount;
+        delete pendingCalcRow.needsAmount;
+        rows.push(pendingCalcRow);
+        pendingCalcRow = null;
+        continue;
+      }
+    }
     if (pendingCalcRow && /^[\d,.]{3,}\s*(?:원)?$/.test(line)) {
       const amount = parseMoneyLike(line);
       if (amount != null && pendingCalcRow.amount == null) pendingCalcRow.amount = amount;
@@ -1002,9 +1039,12 @@ function parseReportLocal(msg) {
         total: null,
         flag: false,
         raw: item.raw,
-        source: 'local'
+        source: 'local',
+        ambiguous: !!item.ambiguous,
+        needsQtyAmount: !!item.needsQtyAmount,
+        needsAmount: !!item.needsAmount
       };
-      if (row.amount == null && /=\s*$/.test(item.raw)) pendingCalcRow = row;
+      if (row.needsQtyAmount || row.needsAmount || (row.amount == null && /=\s*$/.test(item.raw))) pendingCalcRow = row;
       else rows.push(row);
       pendingItem = null;
       continue;
