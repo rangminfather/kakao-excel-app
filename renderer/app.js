@@ -538,22 +538,22 @@ function setStep(key, state, detail) {
 let currentRows = [];
 
 const COLUMNS = [
-  { key: 'date',             label: '날짜',       type: 'text', align: 'left'  },
-  { key: 'sent_time',        label: '전송시간',   type: 'text', align: 'left'  },
-  { key: 'writer',           label: '작성자',     type: 'text', align: 'left'  },
-  { key: 'store',            label: '지점',       type: 'text', align: 'left'  },
-  { key: 'time_start',       label: '시작',       type: 'text', align: 'left'  },
-  { key: 'time_end',         label: '종료',       type: 'text', align: 'left'  },
-  { key: 'item',             label: '품목',       type: 'text', align: 'left'  },
-  { key: 'unit_price',       label: '단가',       type: 'int',  align: 'right' },
-  { key: 'qty',              label: '수량',       type: 'int',  align: 'right' },
-  { key: 'amount',           label: '금액',       type: 'int',  align: 'right' },
-  { key: 'amount_corrected', label: 'AI정정금액', type: 'int',  align: 'right' },
-  { key: 'total',            label: '합계',       type: 'int',  align: 'right' },
-  { key: 'total_corrected',  label: 'AI정정합계', type: 'int',  align: 'right' },
-  { key: 'source',           label: '분석방식',   type: 'text', align: 'left'  },
+  { key: 'date',             label: '\uB0A0\uC9DC',       type: 'text', align: 'left'  },
+  { key: 'sent_time',        label: '\uC804\uC1A1\uC2DC\uAC04',   type: 'text', align: 'left'  },
+  { key: 'writer',           label: '\uC791\uC131\uC790',     type: 'text', align: 'left'  },
+  { key: 'store',            label: '\uC9C0\uC810',       type: 'text', align: 'left'  },
+  { key: 'time_start',       label: '\uC2DC\uC791',       type: 'text', align: 'left'  },
+  { key: 'time_end',         label: '\uC885\uB8CC',       type: 'text', align: 'left'  },
+  { key: 'item',             label: '\uD488\uBAA9',       type: 'text', align: 'left'  },
+  { key: 'unit_price',       label: '\uB2E8\uAC00',       type: 'int',  align: 'right' },
+  { key: 'qty',              label: '\uC218\uB7C9',       type: 'int',  align: 'right' },
+  { key: 'amount',           label: '\uAE08\uC561',       type: 'int',  align: 'right' },
+  { key: 'amount_corrected', label: 'AI\uC815\uC815\uAE08\uC561', type: 'int',  align: 'right' },
+  { key: 'total',            label: '\uD569\uACC4',       type: 'int',  align: 'right' },
+  { key: 'total_corrected',  label: 'AI\uC815\uC815\uD569\uACC4', type: 'int',  align: 'right' },
+  { key: 'source',           label: '\uBD84\uC11D\uBC29\uC2DD',   type: 'text', align: 'left'  },
+  { key: 'remark',           label: '\uBE44\uACE0',       type: 'text', align: 'left'  },
 ];
-
 function renderTable() {
   const tbody = document.getElementById('resultBody');
   tbody.innerHTML = '';
@@ -676,6 +676,7 @@ function normalizeRows(rows) {
       total_corrected: null,
       flag: !!r.flag,
       raw: r.raw ?? '',
+      remark: r.remark ?? '',
       source: r.source ?? null,
       processed_at: r.processed_at ?? null,
       ambiguous: !!r.ambiguous
@@ -794,6 +795,30 @@ function parseLocalNumberToken(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function formatWonLocal(n) {
+  return Number.isFinite(n) ? `${n.toLocaleString('ko-KR')}\uC6D0` : '';
+}
+
+function inferTwoPointRangeBreakdown(low, high, qty, amount) {
+  if (![low, high, qty, amount].every(Number.isFinite)) return null;
+  if (low <= 0 || high <= 0 || qty <= 0 || low === high) return null;
+  const diff = high - low;
+  const highQtyRaw = (amount - (low * qty)) / diff;
+  const highQty = Math.round(highQtyRaw);
+  if (Math.abs(highQtyRaw - highQty) > 1e-9) return null;
+  const lowQty = qty - highQty;
+  if (lowQty < 0 || highQty < 0) return null;
+  if ((low * lowQty) + (high * highQty) !== amount) return null;
+  return { lowQty, highQty };
+}
+
+function makeRangeRemark(low, high, qty, amount) {
+  const base = `\uBC94\uC704\uB85C \uBCF4\uACE0 \uB2E8\uAC00 ${formatWonLocal(low)} ~ ${formatWonLocal(high)}`;
+  const inferred = inferTwoPointRangeBreakdown(low, high, qty, amount);
+  if (!inferred) return base;
+  return `${base}; ${formatWonLocal(low)} ${inferred.lowQty}\uAC1C + ${formatWonLocal(high)} ${inferred.highQty}\uAC1C = ${formatWonLocal(amount)} (\uCD94\uC815)`;
+}
+
 function parseTimeRangeLocal(text) {
   const src = String(text || '');
   let m = src.match(/(\d{1,2})\s*(?:시)?\s*[~\-]\s*(\d{1,2})\s*(?:시)?/);
@@ -827,6 +852,8 @@ function parseItemLineLocal(line, fallbackItem) {
   const rangeRe = new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*[~\\-]\\s*([0-9][\\d,.]{1,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})?(?:\\s*(?:\\uAC1C|\\uBD09|\\uD329|\\uBC15\\uC2A4|ea))?\\s*=?\\s*([0-9][\\d,.]{2,})?$`);
   const rangeMatch = text.match(rangeRe);
   if (rangeMatch) {
+    const low = parseLocalNumberToken(rangeMatch[2]);
+    const high = parseLocalNumberToken(rangeMatch[3]);
     const qty = rangeMatch[4] ? parseLocalNumberToken(rangeMatch[4]) : null;
     const amount = rangeMatch[5] ? parseLocalNumberToken(rangeMatch[5]) : null;
     return {
@@ -836,6 +863,9 @@ function parseItemLineLocal(line, fallbackItem) {
       amount,
       raw: text,
       ambiguous: true,
+      price_range_low: low,
+      price_range_high: high,
+      remark: makeRangeRemark(low, high, qty, amount),
       needsQtyAmount: qty == null,
       needsAmount: qty != null && amount == null
     };
@@ -971,6 +1001,9 @@ function parseReportLocal(msg) {
         pendingCalcRow.qty = parseLocalNumberToken(qtyAmount[1]);
         pendingCalcRow.amount = parseLocalNumberToken(qtyAmount[2]);
         pendingCalcRow.raw = `${pendingCalcRow.raw} ${line}`;
+        if (pendingCalcRow.ambiguous) {
+          pendingCalcRow.remark = makeRangeRemark(pendingCalcRow.price_range_low, pendingCalcRow.price_range_high, pendingCalcRow.qty, pendingCalcRow.amount);
+        }
         delete pendingCalcRow.needsQtyAmount;
         delete pendingCalcRow.needsAmount;
         rows.push(pendingCalcRow);
@@ -982,6 +1015,9 @@ function parseReportLocal(msg) {
       const amount = parseMoneyLike(line);
       if (amount != null && pendingCalcRow.amount == null) pendingCalcRow.amount = amount;
       pendingCalcRow.raw = `${pendingCalcRow.raw} ${line}`;
+      if (pendingCalcRow.ambiguous) {
+        pendingCalcRow.remark = makeRangeRemark(pendingCalcRow.price_range_low, pendingCalcRow.price_range_high, pendingCalcRow.qty, pendingCalcRow.amount);
+      }
       rows.push(pendingCalcRow);
       pendingCalcRow = null;
       continue;
@@ -1041,6 +1077,9 @@ function parseReportLocal(msg) {
         raw: item.raw,
         source: 'local',
         ambiguous: !!item.ambiguous,
+        price_range_low: item.price_range_low,
+        price_range_high: item.price_range_high,
+        remark: item.remark ?? '',
         needsQtyAmount: !!item.needsQtyAmount,
         needsAmount: !!item.needsAmount
       };

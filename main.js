@@ -49,7 +49,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 
-const EXCEL_HEADER = ['날짜','전송시간','작성자','지점','시작시간','종료시간','품목','단가','수량','금액','AI정정금액','합계','AI정정합계','분석방식','검증오류','원본','처리일시'];
+const EXCEL_HEADER = ['\uB0A0\uC9DC','\uC804\uC1A1\uC2DC\uAC04','\uC791\uC131\uC790','\uC9C0\uC810','\uC2DC\uC791\uC2DC\uAC04','\uC885\uB8CC\uC2DC\uAC04','\uD488\uBAA9','\uB2E8\uAC00','\uC218\uB7C9','\uAE08\uC561','AI\uC815\uC815\uAE08\uC561','\uD569\uACC4','AI\uC815\uC815\uD569\uACC4','\uBD84\uC11D\uBC29\uC2DD','\uAC80\uC99D\uC624\uB958','\uC6D0\uBCF8','\uBE44\uACE0','\uCC98\uB9AC\uC77C\uC2DC'];
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -360,6 +360,7 @@ function rowToArray(r) {
     r.source ?? '',
     r.flag ? 'X' : '',
     r.raw ?? '',
+    r.remark ?? '',
     r.processed_at ?? ''
   ];
 }
@@ -370,7 +371,7 @@ async function loadOrCreateWorkbook(filePath) {
     ws.columns = [
       { width: 12 }, { width: 9 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
       { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 14 },
-      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 18 }
+      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 46 }, { width: 18 }
     ];
   };
   const paintHeader = (ws) => {
