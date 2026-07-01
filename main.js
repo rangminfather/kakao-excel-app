@@ -49,7 +49,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 
-const EXCEL_HEADER = ['날짜','전송시간','작성자','지점','시작시간','종료시간','품목','단가','수량','금액','AI정정금액','합계','AI정정합계','검증오류','원본','처리일시'];
+const EXCEL_HEADER = ['날짜','전송시간','작성자','지점','시작시간','종료시간','품목','단가','수량','금액','AI정정금액','합계','AI정정합계','분석방식','검증오류','원본','처리일시'];
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -357,6 +357,7 @@ function rowToArray(r) {
     r.amount_corrected ?? '',
     r.total ?? '',
     r.total_corrected ?? '',
+    r.source ?? '',
     r.flag ? 'X' : '',
     r.raw ?? '',
     r.processed_at ?? ''
@@ -369,7 +370,7 @@ async function loadOrCreateWorkbook(filePath) {
     ws.columns = [
       { width: 12 }, { width: 9 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
       { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 14 },
-      { width: 12 }, { width: 14 }, { width: 9 }, { width: 40 }, { width: 18 }
+      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 18 }
     ];
   };
   const paintHeader = (ws) => {
@@ -481,8 +482,8 @@ ipcMain.handle('excel:saveAs', async (_e, rows, suggestedName) => {
     ws.addRow(EXCEL_HEADER);
     ws.columns = [
       { width: 12 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
-      { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 12 },
-      { width: 9 }, { width: 40 }
+      { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 14 },
+      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 18 }
     ];
     const header = ws.getRow(1);
     header.font = { bold: true };

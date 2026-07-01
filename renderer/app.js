@@ -23,6 +23,7 @@ const cache = {
   apiKeys: [],
   activeKeyId: '',
   activeKeyValue: '',
+  processMode: 'hybrid',
   watchFolder: '',
   filePattern: 'kakaotalk',
   archiveMode: 'keep',
@@ -56,6 +57,11 @@ async function loadAllSettings() {
   cache.apiKeys = await kapi.apiKeys.list();
   cache.activeKeyId = all.activeKeyId || (cache.apiKeys[0] && cache.apiKeys[0].id) || '';
   cache.activeKeyValue = await kapi.apiKeys.getActive();
+  cache.processMode = all.processMode || 'hybrid';
+  if (!['hybrid', 'local', 'ai'].includes(cache.processMode)) {
+    cache.processMode = 'hybrid';
+    await kapi.store.set('processMode', cache.processMode);
+  }
 }
 
 function maskKey(k) {
@@ -514,6 +520,7 @@ const COLUMNS = [
   { key: 'amount_corrected', label: 'AI정정금액', type: 'int',  align: 'right' },
   { key: 'total',            label: '합계',       type: 'int',  align: 'right' },
   { key: 'total_corrected',  label: 'AI정정합계', type: 'int',  align: 'right' },
+  { key: 'source',           label: '분석방식',   type: 'text', align: 'left'  },
 ];
 
 function renderTable() {
@@ -630,6 +637,7 @@ function normalizeRows(rows) {
       total_corrected: null,
       flag: !!r.flag,
       raw: r.raw ?? '',
+      source: r.source ?? null,
       processed_at: r.processed_at ?? null
     };
     if (o.unit_price != null && o.qty != null && o.amount != null) {
@@ -731,6 +739,197 @@ function normalizeRows(rows) {
   return final;
 }
 
+function parseMoneyLike(text) {
+  if (!text) return null;
+  const matches = String(text).match(/[\d,]{3,}/g);
+  if (!matches || !matches.length) return null;
+  const n = Number(matches[matches.length - 1].replace(/,/g, ''));
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+function parseTimeRangeLocal(text) {
+  const m = String(text || '').match(/(\d{1,2})\s*(?:시)?\s*[~\-]\s*(\d{1,2})\s*(?:시)?/);
+  if (!m) return { time_start: null, time_end: null };
+  const start = Math.max(0, Math.min(23, Number(m[1])));
+  const end = Math.max(0, Math.min(23, Number(m[2])));
+  return {
+    time_start: `${String(start).padStart(2, '0')}:00`,
+    time_end: `${String(end).padStart(2, '0')}:00`
+  };
+}
+
+function cleanLocalItemName(name) {
+  return String(name || '')
+    .replace(/^[\s\-:·]+/, '')
+    .replace(/[\s\-:·]+$/, '')
+    .replace(/\b(행사결과|시간|총|합계)\b/g, '')
+    .replace(/\d+\s*(개|봉|팩|박스|ea)$/i, '')
+    .trim() || null;
+}
+
+function looksLikeTotalLine(line) {
+  return /(총|합계|소계|행사결과|total)/i.test(line) && /[\d,]{3,}/.test(line);
+}
+
+function parseItemLineLocal(line, fallbackItem) {
+  const text = String(line || '').trim();
+  if (!text || looksLikeTotalLine(text)) return null;
+  const patterns = [
+    /^(.+?)[\s\-:]*([0-9][\d,]{1,7})\s*[xX×*]\s*([0-9][\d,]{0,5})(?:\s*=\s*([0-9][\d,]{2,}))?/,
+    /^(.+?)[\s\-:]*([0-9][\d,]{0,5})\s*(?:개|봉|팩|박스|ea)?\s*[xX×*]\s*([0-9][\d,]{1,7})(?:\s*=\s*([0-9][\d,]{2,}))?/
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (!m) continue;
+    let item = cleanLocalItemName(m[1]);
+    let a = Number(String(m[2]).replace(/,/g, ''));
+    let b = Number(String(m[3]).replace(/,/g, ''));
+    const amount = m[4] ? Number(String(m[4]).replace(/,/g, '')) : null;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    let unit_price = a;
+    let qty = b;
+    if (a < 1000 && b >= 1000) {
+      qty = a;
+      unit_price = b;
+    }
+    return { item: item || fallbackItem || null, unit_price, qty, amount: Number.isFinite(amount) ? amount : null, raw: text };
+  }
+  const numericOnly = text.match(/^([0-9][\d,]{0,5})\s*[xX×*]\s*([0-9][\d,]{1,7})(?:\s*=\s*([0-9][\d,]{2,}))?$/);
+  if (numericOnly && fallbackItem) {
+    let a = Number(numericOnly[1].replace(/,/g, ''));
+    let b = Number(numericOnly[2].replace(/,/g, ''));
+    const amount = numericOnly[3] ? Number(numericOnly[3].replace(/,/g, '')) : null;
+    let unit_price = a;
+    let qty = b;
+    if (a < 1000 && b >= 1000) {
+      qty = a;
+      unit_price = b;
+    }
+    return { item: fallbackItem, unit_price, qty, amount: Number.isFinite(amount) ? amount : null, raw: text };
+  }
+  return null;
+}
+
+function parseReportLocal(msg) {
+  const lines = String(msg.body || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const joined = lines.join('\n');
+  const time = parseTimeRangeLocal(joined);
+  let store = null;
+  let pendingItem = null;
+  let total = null;
+  const rows = [];
+  for (const line of lines) {
+    if (!store && /(마트|점|트레이더스|이마트|홈플|코스트코|농협|매장|지점)/.test(line) && !/[xX×*=]/.test(line)) {
+      store = line;
+      continue;
+    }
+    if (looksLikeTotalLine(line)) {
+      total = parseMoneyLike(line);
+      continue;
+    }
+    if (/^\d{1,2}\s*(?:시)?\s*[~\-]\s*\d{1,2}\s*(?:시)?$/.test(line)) continue;
+    if (/^(시간|행사결과|보고|정산)$/i.test(line)) continue;
+    const item = parseItemLineLocal(line, pendingItem);
+    if (item && item.item) {
+      rows.push({
+        date: msg.date || null,
+        sent_time: msg.time || null,
+        writer: msg.writer || null,
+        store,
+        time_start: time.time_start,
+        time_end: time.time_end,
+        item: item.item,
+        unit_price: item.unit_price,
+        qty: item.qty,
+        amount: item.amount,
+        total: null,
+        flag: false,
+        raw: item.raw,
+        source: 'local'
+      });
+      pendingItem = null;
+      continue;
+    }
+    if (!/[0-9]/.test(line) && line.length <= 40 && !/(님이|사진|동영상|이모티콘)/.test(line)) {
+      pendingItem = line;
+    }
+  }
+  if (!store) {
+    store = lines.find(line => !/[xX×*=]/.test(line) && !parseTimeRangeLocal(line).time_start && !looksLikeTotalLine(line)) || null;
+    rows.forEach(r => { if (!r.store) r.store = store; });
+  }
+  if (total != null && rows.length > 0) {
+    rows.push({
+      date: msg.date || null,
+      sent_time: msg.time || null,
+      writer: msg.writer || null,
+      store,
+      time_start: time.time_start,
+      time_end: time.time_end,
+      item: null,
+      unit_price: null,
+      qty: null,
+      amount: null,
+      total,
+      flag: false,
+      raw: '소계',
+      source: 'local'
+    });
+  }
+  return { rows, unresolved: rows.length === 0 };
+}
+
+async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
+  const mode = cache.processMode || 'hybrid';
+  const allRows = [];
+  const localRawRows = [];
+  const aiItems = [];
+  let localCount = 0;
+  let aiCount = 0;
+  if (mode !== 'ai') {
+    for (const item of items) {
+      const parsed = parseReportLocal(item.msg);
+      if (parsed.rows.length) {
+        localRawRows.push(...parsed.rows);
+        localCount++;
+      } else if (mode === 'hybrid') {
+        aiItems.push(item);
+      }
+    }
+  } else {
+    aiItems.push(...items);
+  }
+  if (localRawRows.length > 0) {
+    const normalized = normalizeRows(localRawRows);
+    normalized.forEach(r => {
+      r.processed_at = runStamp;
+      if (!r.source) r.source = 'local';
+    });
+    allRows.push(...normalized);
+  }
+  if (aiItems.length > 0) {
+    if (!apiKey) throw new Error('Gemini API Key is required for hybrid/AI processing');
+    const BATCH = 15;
+    for (let i = 0; i < aiItems.length; i += BATCH) {
+      const slice = aiItems.slice(i, i + BATCH);
+      const combined = slice.map(x => {
+        const m = x.msg;
+        return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
+      }).join('\n\n---\n\n');
+      const rows = await callGemini(apiKey, combined);
+      const normalized = normalizeRows(rows);
+      normalized.forEach(r => {
+        r.processed_at = runStamp;
+        r.source = 'gemini';
+      });
+      allRows.push(...normalized);
+      aiCount += slice.length;
+      if (onProgress) onProgress(localCount, aiCount, aiItems.length);
+    }
+  }
+  return { rows: allRows, localCount, aiCount, skippedCount: items.length - localCount - aiCount };
+}
+
 /* =========================================================================
  * 7) 파일 감지 & 선택
  * ========================================================================= */
@@ -796,7 +995,8 @@ document.getElementById('btnRefreshDetect').addEventListener('click', () => {
  * 8) 실행 — 카톡 .txt (메인 흐름)
  * ========================================================================= */
 document.getElementById('runTxt').addEventListener('click', async () => {
-  if (!cache.activeKeyValue) { toast('먼저 Gemini API Key를 설정에서 등록하세요', 'err'); return; }
+  const processingMode = cache.processMode || 'hybrid';
+  if (processingMode !== 'local' && !cache.activeKeyValue) { toast('먼저 Gemini API Key를 설정에서 등록하세요', 'err'); return; }
   if (!selectedFile) { toast('처리할 파일이 없습니다', 'err'); return; }
 
   const mode = document.querySelector('input[name=rangeMode]:checked')?.value || 'auto';
@@ -869,27 +1069,17 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     }
 
     // AI 정형화 배치
-    setStep('ai', 'current', `0/${fresh.length}`);
-    const BATCH = 15;
+    setStep('ai', 'current', `local/AI 0/${fresh.length}`);
     const runStamp = nowTimestamp();
-    const allRows = [];
     const newHashes = [];
-    for (let i = 0; i < fresh.length; i += BATCH) {
-      const slice = fresh.slice(i, i + BATCH);
-      const combined = slice.map(x => {
-        const m = x.msg;
-        return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
-      }).join('\n\n---\n\n');
-      const rows = await callGemini(cache.activeKeyValue, combined);
-      const normalized = normalizeRows(rows);
-      normalized.forEach(r => r.processed_at = runStamp);
-      allRows.push(...normalized);
-      newHashes.push(...slice.map(x => x.hash));
-      const doneCount = Math.min(i + BATCH, fresh.length);
-      setStep('ai', 'current', `${doneCount}/${fresh.length}`);
+    const processed = await processItemsWithMode(fresh, cache.activeKeyValue, runStamp, (localCount, aiCount, aiTotal) => {
+      const doneCount = localCount + aiCount;
+      setStep('ai', 'current', `local ${localCount} / AI ${aiCount}/${aiTotal}`);
       setProgress(35 + Math.round((doneCount / fresh.length) * 50));
-    }
-    setStep('ai', 'done', `${fresh.length}건 완료`);
+    });
+    const allRows = processed.rows;
+    newHashes.push(...fresh.map(x => x.hash));
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / skip ${processed.skippedCount}`);
     setProgress(85);
 
     currentRows = allRows;
@@ -954,7 +1144,8 @@ document.getElementById('runTxt').addEventListener('click', async () => {
  * 9) 실행 — 텍스트 붙여넣기
  * ========================================================================= */
 document.getElementById('runPaste').addEventListener('click', async () => {
-  if (!cache.activeKeyValue) { toast('먼저 Gemini API Key를 설정에서 등록하세요', 'err'); return; }
+  const processingMode = cache.processMode || 'hybrid';
+  if (processingMode !== 'local' && !cache.activeKeyValue) { toast('먼저 Gemini API Key를 설정에서 등록하세요', 'err'); return; }
   const text = document.getElementById('pasteText').value.trim();
   if (!text) { toast('붙여넣은 내용이 없습니다', 'err'); return; }
   const date = document.getElementById('pasteDate').value || todayYMD();
@@ -968,12 +1159,15 @@ document.getElementById('runPaste').addEventListener('click', async () => {
     setStep('dedupe', 'done', '-');
     setStep('ai', 'current');
     setProgress(40);
-    const rows = await callGemini(cache.activeKeyValue, payload);
-    currentRows = normalizeRows(rows);
     const runStamp = nowTimestamp();
-    currentRows.forEach(r => r.processed_at = runStamp);
+    const item = {
+      msg: { date, time: null, writer: null, body: text },
+      hash: messageHash({ date, time: '', writer: '', body: text })
+    };
+    const processed = await processItemsWithMode([item], cache.activeKeyValue, runStamp);
+    currentRows = processed.rows;
     renderTable();
-    setStep('ai', 'done', `${currentRows.length}행`);
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / skip ${processed.skippedCount}`);
     setStep('excel', 'done', '수동 저장 대기');
     setProgress(100);
     setTimeout(hideProgress, 600);
@@ -1106,6 +1300,18 @@ document.getElementById('modelSelect').addEventListener('change', async (e) => {
   cache.model = e.target.value;
   await kapi.store.set('model', cache.model);
   toast(`모델 변경: ${cache.model}`, 'ok');
+});
+
+function renderProcessModeSelect() {
+  const sel = document.getElementById('processModeSelect');
+  if (!sel) return;
+  sel.value = cache.processMode || 'hybrid';
+}
+
+document.getElementById('processModeSelect')?.addEventListener('change', async (e) => {
+  cache.processMode = e.target.value;
+  await kapi.store.set('processMode', cache.processMode);
+  toast(`처리 방식 변경: ${cache.processMode}`, 'ok');
 });
 
 function renderApiKeyList() {
@@ -1324,6 +1530,7 @@ async function init() {
   document.getElementById('rangePickOne').value = todayYMD();
   if (cache.draftText) document.getElementById('pasteText').value = cache.draftText;
   renderModelSelect();
+  renderProcessModeSelect();
   renderApiKeyList();
   renderPaths();
   updateApiKeyStatus();
