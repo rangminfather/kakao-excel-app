@@ -24,6 +24,7 @@ const cache = {
   activeKeyId: '',
   activeKeyValue: '',
   processMode: 'hybrid',
+  saveMode: 'append',
   watchFolder: '',
   filePattern: 'kakaotalk',
   archiveMode: 'keep',
@@ -61,6 +62,11 @@ async function loadAllSettings() {
   if (!['hybrid', 'local', 'ai'].includes(cache.processMode)) {
     cache.processMode = 'hybrid';
     await kapi.store.set('processMode', cache.processMode);
+  }
+  cache.saveMode = all.saveMode || 'append';
+  if (!['append', 'new', 'manual'].includes(cache.saveMode)) {
+    cache.saveMode = 'append';
+    await kapi.store.set('saveMode', cache.saveMode);
   }
 }
 
@@ -471,9 +477,28 @@ function fileToBase64(file) {
  * 4) 진행률 표시
  * ========================================================================= */
 const STEP_ORDER = ['read', 'filter', 'dedupe', 'ai', 'excel'];
+let progressStartedAt = 0;
+let progressTimer = null;
+
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+function updateElapsed() {
+  const el = document.getElementById('progressElapsed');
+  if (!el || !progressStartedAt) return;
+  el.textContent = formatElapsed(Date.now() - progressStartedAt);
+}
 
 function showProgress() {
   document.getElementById('progressPanel').classList.remove('hidden');
+  progressStartedAt = Date.now();
+  if (progressTimer) clearInterval(progressTimer);
+  updateElapsed();
+  progressTimer = setInterval(updateElapsed, 1000);
   document.querySelectorAll('#progressSteps .step').forEach(el => {
     el.classList.remove('done', 'current');
     el.classList.add('pending');
@@ -483,6 +508,8 @@ function showProgress() {
 }
 function hideProgress() {
   document.getElementById('progressPanel').classList.add('hidden');
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = null;
 }
 function setProgress(pct) {
   document.getElementById('progressFill').style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -887,13 +914,18 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress) {
   let localCount = 0;
   let aiCount = 0;
   if (mode !== 'ai') {
+    let scanned = 0;
     for (const item of items) {
+      scanned++;
       const parsed = parseReportLocal(item.msg);
       if (parsed.rows.length) {
         localRawRows.push(...parsed.rows);
         localCount++;
       } else if (mode === 'hybrid') {
         aiItems.push(item);
+      }
+      if (onProgress && (scanned % 50 === 0 || scanned === items.length)) {
+        onProgress(localCount, aiCount, mode === 'hybrid' ? aiItems.length : 0, scanned, items.length);
       }
     }
   } else {
@@ -1039,7 +1071,7 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     const candidates = filtered.filter(m => looksLikeReport(m.body));
     const prevHashes = new Set(cache.processedHashes);
     const hashed = candidates.map(m => ({ msg: m, hash: messageHash(m) }));
-    const explicitPick = (mode === 'pickDate' || mode === 'custom');
+    const explicitPick = (mode === 'pickDate' || mode === 'custom' || mode === 'all');
     const fresh = explicitPick ? hashed : hashed.filter(x => !prevHashes.has(x.hash));
     const dupCount = hashed.length - fresh.length;
     setStep('dedupe', 'done',
@@ -1072,10 +1104,11 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     setStep('ai', 'current', `local/AI 0/${fresh.length}`);
     const runStamp = nowTimestamp();
     const newHashes = [];
-    const processed = await processItemsWithMode(fresh, cache.activeKeyValue, runStamp, (localCount, aiCount, aiTotal) => {
+    const processed = await processItemsWithMode(fresh, cache.activeKeyValue, runStamp, (localCount, aiCount, aiTotal, scanned, total) => {
       const doneCount = localCount + aiCount;
-      setStep('ai', 'current', `local ${localCount} / AI ${aiCount}/${aiTotal}`);
-      setProgress(35 + Math.round((doneCount / fresh.length) * 50));
+      const scanText = total ? ` scan ${scanned}/${total}` : '';
+      setStep('ai', 'current', `local ${localCount} / AI ${aiCount}/${aiTotal}${scanText}`);
+      setProgress(35 + Math.round((Math.max(doneCount, scanned || 0) / fresh.length) * 50));
     });
     const allRows = processed.rows;
     newHashes.push(...fresh.map(x => x.hash));
@@ -1089,24 +1122,22 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     setStep('excel', 'current');
     let excelOk = false;
     let excelPending = false;
-    if (cache.excelOutputPath) {
-      const res = await kapi.excel.appendRows(allRows, cache.excelOutputPath);
-      if (res.ok) {
-        excelOk = true;
+    const saveRes = await saveRowsByMode(allRows);
+    if (saveRes.ok) {
+      excelOk = !saveRes.skipped;
+      setStep('excel', 'done', saveRes.label || '저장 완료');
+      if (!saveRes.skipped) {
         cache.accumulatedRows = cache.accumulatedRows.concat(allRows);
         await kapi.store.set('accumulatedRows', cache.accumulatedRows);
         cache.totalCount += allRows.length;
         await kapi.store.set('totalCount', cache.totalCount);
-        setStep('excel', 'done', `${allRows.length}행 append`);
-      } else if (res.code === 'EBUSY' || res.code === 'EPERM' || res.code === 'EACCES') {
-        excelPending = true;
-        setStep('excel', 'done', '엑셀 열림 - 대기');
-        toast('⚠ 엑셀이 열려있어 저장 불가. Excel을 닫은 뒤 결과 영역의 "📥 누적 파일에 추가" 버튼을 눌러 저장하세요.', 'err', 10000);
-      } else {
-        throw new Error('엑셀 저장 실패: ' + res.error);
       }
+    } else if (saveRes.code === 'EBUSY' || saveRes.code === 'EPERM' || saveRes.code === 'EACCES') {
+      excelPending = true;
+      setStep('excel', 'done', '엑셀 열림 - 대기');
+      toast('엑셀이 열려있어 저장 불가. Excel을 닫은 뒤 결과 영역의 "누적 파일에 추가" 버튼을 눌러 저장하세요.', 'err', 10000);
     } else {
-      setStep('excel', 'done', '경로 미설정 - 스킵');
+      throw new Error('엑셀 저장 실패: ' + saveRes.error);
     }
 
     // 해시/마지막날짜는 엑셀 성공(또는 경로 미설정)일 때만 업데이트
@@ -1242,6 +1273,20 @@ document.getElementById('downloadCurrent').addEventListener('click', async () =>
   else toast('저장 실패: ' + res.error, 'err');
 });
 
+async function saveRowsByMode(rows) {
+  const mode = cache.saveMode || 'append';
+  if (mode === 'manual') return { ok: true, skipped: true, label: '수동 저장 대기' };
+  if (mode === 'new') {
+    const stamp = todayYMD().replace(/-/g, '') + '_' + new Date().toTimeString().slice(0, 8).replace(/:/g, '');
+    const res = await kapi.excel.saveAs(rows, `카톡행사보고_${stamp}.xlsx`);
+    if (res.canceled) return { ok: true, skipped: true, label: '새 파일 저장 취소' };
+    return { ...res, label: res.ok ? '새 파일 저장' : '새 파일 저장 실패' };
+  }
+  if (!cache.excelOutputPath) return { ok: true, skipped: true, label: '경로 미설정 - 스킵' };
+  const res = await kapi.excel.appendRows(rows, cache.excelOutputPath);
+  return { ...res, label: res.ok ? `${rows.length}행 append` : '누적 저장 실패' };
+}
+
 document.getElementById('saveAccumulate').addEventListener('click', async () => {
   if (!currentRows.length) { toast('저장할 행이 없습니다', 'err'); return; }
   if (!cache.excelOutputPath) { toast('설정에서 누적 엑셀 저장 경로를 지정하세요', 'err'); return; }
@@ -1308,10 +1353,22 @@ function renderProcessModeSelect() {
   sel.value = cache.processMode || 'hybrid';
 }
 
+function renderSaveModeSelect() {
+  const sel = document.getElementById('saveModeSelect');
+  if (!sel) return;
+  sel.value = cache.saveMode || 'append';
+}
+
 document.getElementById('processModeSelect')?.addEventListener('change', async (e) => {
   cache.processMode = e.target.value;
   await kapi.store.set('processMode', cache.processMode);
   toast(`처리 방식 변경: ${cache.processMode}`, 'ok');
+});
+
+document.getElementById('saveModeSelect')?.addEventListener('change', async (e) => {
+  cache.saveMode = e.target.value;
+  await kapi.store.set('saveMode', cache.saveMode);
+  toast(`저장 방식 변경: ${cache.saveMode}`, 'ok');
 });
 
 function renderApiKeyList() {
@@ -1531,6 +1588,7 @@ async function init() {
   if (cache.draftText) document.getElementById('pasteText').value = cache.draftText;
   renderModelSelect();
   renderProcessModeSelect();
+  renderSaveModeSelect();
   renderApiKeyList();
   renderPaths();
   updateApiKeyStatus();

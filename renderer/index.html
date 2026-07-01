@@ -51,10 +51,16 @@
   }
   .step { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; }
   .step.done { color: #10b981; }
-  .step.current { color: #000; font-weight: 600; }
+  .step.current {
+    color: #000; font-weight: 600; border-radius: 6px;
+    background: linear-gradient(90deg, transparent 0%, rgba(254,229,0,0.45) 45%, transparent 90%);
+    background-size: 220% 100%;
+    animation: step-sweep 1.4s linear infinite;
+  }
   .step.pending { color: #9ca3af; }
   .step .icon { width: 16px; display: inline-block; text-align: center; }
   .path-input { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+  @keyframes step-sweep { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -147,6 +153,7 @@
             <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="auto" checked class="mt-0.5"> <span><span class="font-semibold">마지막 처리일 이후</span> <span class="text-xs text-gray-500">(권장 · 증분) — <span id="lastDateHint" class="text-gray-700">처음 실행</span></span></span></label>
             <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="pickDate" class="mt-0.5"> <span><span class="font-semibold">특정 날짜</span> <span class="text-xs text-gray-500">— 날짜 하나 선택해 재처리 (중복검사 OFF)</span></span></label>
             <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="custom" class="mt-0.5"> <span><span class="font-semibold">기간 지정</span> <span class="text-xs text-gray-500">— 시작~종료 범위 재처리 (중복검사 OFF)</span></span></label>
+            <label class="flex items-start gap-2"><input type="radio" name="rangeMode" value="all" class="mt-0.5"> <span><span class="font-semibold">텍스트 전체(AtoZ)</span> <span class="text-xs text-gray-500">— 파일 전체를 처음부터 끝까지 재분석 (중복검사 OFF)</span></span></label>
           </div>
           <div id="pickDateRow" class="mt-2 hidden">
             <input type="date" id="rangePickOne" class="border rounded-lg px-3 py-2 text-sm">
@@ -193,7 +200,10 @@
     <div class="flex items-center gap-3">
       <div class="spinner"></div>
       <div class="font-semibold">처리 중…</div>
-      <div id="progressPct" class="ml-auto text-sm text-gray-500">0%</div>
+      <div class="ml-auto text-right text-sm text-gray-500">
+        <div id="progressPct">0%</div>
+        <div id="progressElapsed" class="text-xs">00:00</div>
+      </div>
     </div>
     <div class="progress-bar"><div id="progressFill" style="width:0%"></div></div>
     <div id="progressSteps" class="mt-2 space-y-0.5">
@@ -317,6 +327,16 @@
         <!-- 경로 설정 -->
         <div class="space-y-3">
           <h3 class="text-sm font-semibold">📁 경로 설정</h3>
+
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">저장 방식</label>
+            <select id="saveModeSelect" class="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+              <option value="append">지정된 누적 파일에 계속 추가</option>
+              <option value="new">실행할 때마다 새 엑셀 파일로 저장</option>
+              <option value="manual">자동 저장 안 함 (결과 확인 후 버튼으로 저장)</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-500">전체(AtoZ) 재분석은 중복 누적을 피하려면 새 파일 저장을 권장합니다.</p>
+          </div>
 
           <div>
             <label class="block text-xs text-gray-600 mb-1">감시 폴더 (카톡 .txt 자동 감지)</label>
