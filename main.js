@@ -365,6 +365,31 @@ function rowToArray(r) {
   ];
 }
 
+function applyWorksheetView(ws) {
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+}
+
+function addRowsWithDateBreaks(ws, rows) {
+  let prevDate = null;
+  let added = 0;
+  for (const r of rows) {
+    const curDate = r?.date || '';
+    if (prevDate && curDate && curDate !== prevDate) {
+      ws.addRow([]);
+      ws.addRow([]);
+    }
+    const row = ws.addRow(rowToArray(r));
+    added++;
+    if (r.flag) {
+      row.eachCell((cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE2E2' } };
+      });
+    }
+    if (curDate) prevDate = curDate;
+  }
+  return added;
+}
+
 async function loadOrCreateWorkbook(filePath) {
   const wb = new ExcelJS.Workbook();
   const applyColumnWidths = (ws) => {
@@ -379,6 +404,11 @@ async function loadOrCreateWorkbook(filePath) {
     header.font = { bold: true };
     header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
   };
+  const finishSheet = (ws) => {
+    applyColumnWidths(ws);
+    applyWorksheetView(ws);
+    paintHeader(ws);
+  };
   if (fsSync.existsSync(filePath)) {
     try {
       await wb.xlsx.readFile(filePath);
@@ -386,8 +416,7 @@ async function loadOrCreateWorkbook(filePath) {
       if (!ws) ws = wb.addWorksheet('카톡행사보고');
       if (ws.rowCount === 0) {
         ws.addRow(EXCEL_HEADER);
-        applyColumnWidths(ws);
-        paintHeader(ws);
+        finishSheet(ws);
       } else {
         // 헤더 이름 기반 마이그레이션: 기존 헤더와 최신 EXCEL_HEADER를 매핑해 재배열
         const oldHeaderRow = ws.getRow(1);
@@ -420,8 +449,7 @@ async function loadOrCreateWorkbook(filePath) {
           }
           log.info(`[excel] schema migrated → v4: ${filePath}`);
         }
-        applyColumnWidths(ws);
-        paintHeader(ws);
+        finishSheet(ws);
       }
       return { wb, ws };
     } catch (e) {
@@ -432,8 +460,7 @@ async function loadOrCreateWorkbook(filePath) {
   }
   const ws = wb.addWorksheet('카톡행사보고');
   ws.addRow(EXCEL_HEADER);
-  applyColumnWidths(ws);
-  paintHeader(ws);
+  finishSheet(ws);
   return { wb, ws };
 }
 
@@ -453,14 +480,7 @@ ipcMain.handle('excel:appendRows', async (_e, rows, targetPath) => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
       });
     }
-    for (const r of rows) {
-      const row = ws.addRow(rowToArray(r));
-      if (r.flag) {
-        row.eachCell((cell) => {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE2E2' } };
-        });
-      }
-    }
+    addRowsWithDateBreaks(ws, rows);
     await wb.xlsx.writeFile(filePath);
     return { ok: true, path: filePath, appendedRows: rows.length };
   } catch (e) {
@@ -482,21 +502,15 @@ ipcMain.handle('excel:saveAs', async (_e, rows, suggestedName) => {
     const ws = wb.addWorksheet('카톡행사보고');
     ws.addRow(EXCEL_HEADER);
     ws.columns = [
-      { width: 12 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
+      { width: 12 }, { width: 9 }, { width: 10 }, { width: 18 }, { width: 8 }, { width: 8 },
       { width: 20 }, { width: 10 }, { width: 7 }, { width: 12 }, { width: 14 },
-      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 18 }
+      { width: 12 }, { width: 14 }, { width: 10 }, { width: 9 }, { width: 40 }, { width: 46 }, { width: 18 }
     ];
+    applyWorksheetView(ws);
     const header = ws.getRow(1);
     header.font = { bold: true };
     header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE500' } };
-    for (const r of rows) {
-      const row = ws.addRow(rowToArray(r));
-      if (r.flag) {
-        row.eachCell((cell) => {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE2E2' } };
-        });
-      }
-    }
+    addRowsWithDateBreaks(ws, rows);
     await wb.xlsx.writeFile(result.filePath);
     return { ok: true, path: result.filePath };
   } catch (e) {

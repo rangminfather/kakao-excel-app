@@ -679,9 +679,10 @@ function normalizeRows(rows) {
       remark: r.remark ?? '',
       source: r.source ?? null,
       processed_at: r.processed_at ?? null,
-      ambiguous: !!r.ambiguous
+      ambiguous: !!r.ambiguous,
+      estimated: !!r.estimated
     };
-    if (!o.ambiguous && o.unit_price != null && o.qty != null && o.amount != null) {
+    if (!o.ambiguous && !o.estimated && o.unit_price != null && o.qty != null && o.amount != null) {
       o.flag = (o.unit_price * o.qty) !== o.amount;
     }
     if (o.ambiguous) o.flag = true;
@@ -705,7 +706,7 @@ function normalizeRows(rows) {
   for (const r of out) {
     r.amount_corrected = null;
     const hasItem = r.item !== null && r.item !== undefined && String(r.item).trim() !== '';
-    if (!r.ambiguous && hasItem && r.unit_price != null && r.qty != null) {
+    if (!r.ambiguous && !r.estimated && hasItem && r.unit_price != null && r.qty != null) {
       const calc = r.unit_price * r.qty;
       if (r.amount != null && calc !== r.amount) r.amount_corrected = calc;
     }
@@ -723,9 +724,9 @@ function normalizeRows(rows) {
       if (sumAmt !== subtotal.total) subtotal.flag = true;
     }
     // 정정용: Σ(unit_price × qty) — 단가·수량 있는 품목만 부분 합산 (일부 누락이어도 가능)
-    if (itemRows.some(r => r.ambiguous)) continue;
+    if (itemRows.some(r => r.ambiguous || r.estimated)) continue;
     const calcable = itemRows.filter(r => !r.ambiguous && r.unit_price != null && r.qty != null);
-    if (calcable.length > 0) {
+    if (calcable.length === itemRows.length) {
       const sumCalc = calcable.reduce((s, r) => s + (r.unit_price * r.qty), 0);
       if (sumCalc !== subtotal.total) subtotal.total_corrected = sumCalc;
     }
@@ -833,12 +834,14 @@ function parseTimeRangeLocal(text) {
 }
 
 function cleanLocalItemName(name) {
-  return String(name || '')
+  const cleaned = String(name || '')
     .replace(/^[\s\-:·]+/, '')
     .replace(/[\s\-:·]+$/, '')
     .replace(/\b(행사결과|시간|총|합계)\b/g, '')
     .replace(/\d+\s*(개|봉|팩|박스|ea)$/i, '')
-    .trim() || null;
+    .trim();
+  if (!cleaned || !/[A-Za-z가-힣]/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function looksLikeTotalLine(line) {
@@ -871,13 +874,14 @@ function parseItemLineLocal(line, fallbackItem) {
     };
   }
   const patterns = [
-    new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`),
-    new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{0,5})\\s*(?:개|봉|팩|박스|ea)?\\s*${mul}\\s*([0-9][\\d,.]{1,7})(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`)
+    new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*(?:원)?\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`),
+    new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{0,5})\\s*(?:개|봉|팩|박스|ea)?\\s*${mul}\\s*([0-9][\\d,.]{1,7})(?:\\s*(?:원))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?`)
   ];
   for (const re of patterns) {
     const m = text.match(re);
     if (!m) continue;
     let item = cleanLocalItemName(m[1]);
+    if (!item && fallbackItem && /^\s*[0-9]/.test(text)) continue;
     let a = Number(String(m[2]).replace(/[,.]/g, ''));
     let b = Number(String(m[3]).replace(/[,.]/g, ''));
     const amount = m[4] ? Number(String(m[4]).replace(/[,.]/g, '')) : null;
@@ -888,7 +892,7 @@ function parseItemLineLocal(line, fallbackItem) {
       qty = a;
       unit_price = b;
     }
-    return { item: item || fallbackItem || null, unit_price, qty, amount: Number.isFinite(amount) ? amount : null, raw: text };
+    return { item: item || fallbackItem || null, unit_price, qty, amount: Number.isFinite(amount) ? amount : null, raw: text, needsAmount: !Number.isFinite(amount) };
   }
   const qtyAmount = text.match(/^(.+?)[\s\-:]*([0-9][\d,.]{0,5})\s*(?:개|봉|팩|박스|ea)?\s*[~\-]\s*([0-9][\d,.]{2,})\s*(?:원)?$/i);
   if (qtyAmount) {
@@ -902,7 +906,7 @@ function parseItemLineLocal(line, fallbackItem) {
       raw: text
     };
   }
-  const numericOnly = new RegExp(`^([0-9][\\d,.]{0,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*=\\s*([0-9][\\d,.]{2,}))?$`).exec(text);
+  const numericOnly = new RegExp(`^([0-9][\\d,.]{0,7})\\s*(?:원)?\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*\\([^)]*\\))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?$`).exec(text);
   if (numericOnly && fallbackItem) {
     let a = Number(numericOnly[1].replace(/[,.]/g, ''));
     let b = Number(numericOnly[2].replace(/[,.]/g, ''));
@@ -920,7 +924,7 @@ function parseItemLineLocal(line, fallbackItem) {
 
 function parseCalcOnlyLocal(line) {
   const text = String(line || '').trim();
-  const m = text.match(/([0-9][\d,.]{1,7})\s*[xX×*횞]\s*([0-9][\d,.]{0,5})(?:\s*(?:개|봉|팩|박스|ea))?\s*=?\s*([0-9][\d,.]{2,})?$/);
+  const m = text.match(/^([0-9][\d,.]{1,7})\s*(?:원)?\s*[xX×*횞]\s*([0-9][\d,.]{0,5})(?:\s*(?:개|봉|팩|박스|ea))?(?:\s*\([^)]*\))?\s*=?\s*([0-9][\d,.]{2,})?$/);
   if (!m) return null;
   let a = Number(m[1].replace(/[,.]/g, ''));
   let b = Number(m[2].replace(/[,.]/g, ''));
@@ -938,6 +942,25 @@ function parseCalcOnlyLocal(line) {
     amount: Number.isFinite(amount) ? amount : null,
     raw: text,
     needsAmount: /=$/.test(text) || amount == null
+  };
+}
+
+function parseQtyOnlyItemLocal(line) {
+  const text = String(line || '').trim();
+  if (!text || /^총/.test(text) || looksLikeTotalLine(text) || /[xX×*횞=]/.test(text)) return null;
+  const m = text.match(/^(.+?)[\s\-:]*([0-9][\d,.]{0,5})\s*(?:개|봉|팩|박스|ea)$/i);
+  if (!m) return null;
+  const item = cleanLocalItemName(m[1]);
+  const qty = parseLocalNumberToken(m[2]);
+  if (!item || !Number.isFinite(qty)) return null;
+  return {
+    item,
+    unit_price: null,
+    qty,
+    amount: null,
+    raw: text,
+    needsAmount: true,
+    qtyOnly: true
   };
 }
 
@@ -993,10 +1016,11 @@ function parseReportLocal(msg) {
   let pendingItem = null;
   let pendingCalcRow = null;
   let total = null;
+  const residualRows = [];
   const rows = [];
   for (const line of lines) {
     if (pendingCalcRow && pendingCalcRow.needsQtyAmount) {
-      const qtyAmount = String(line || '').trim().match(/^([0-9][\d,.]{0,5})\s*=\s*([0-9][\d,.]{2,})$/);
+      const qtyAmount = String(line || '').trim().match(/^([0-9][\d,.]{0,5})\s*=\s*([0-9][\d,.]{2,})\s*(?:원)?$/);
       if (qtyAmount) {
         pendingCalcRow.qty = parseLocalNumberToken(qtyAmount[1]);
         pendingCalcRow.amount = parseLocalNumberToken(qtyAmount[2]);
@@ -1011,7 +1035,7 @@ function parseReportLocal(msg) {
         continue;
       }
     }
-    if (pendingCalcRow && /^[\d,.]{3,}\s*(?:원)?$/.test(line)) {
+    if (pendingCalcRow && /^=?\s*[\d,.]{3,}\s*(?:원)?$/.test(line)) {
       const amount = parseMoneyLike(line);
       if (amount != null && pendingCalcRow.amount == null) pendingCalcRow.amount = amount;
       pendingCalcRow.raw = `${pendingCalcRow.raw} ${line}`;
@@ -1088,6 +1112,30 @@ function parseReportLocal(msg) {
       pendingItem = null;
       continue;
     }
+    const qtyOnly = parseQtyOnlyItemLocal(line);
+    if (qtyOnly && qtyOnly.item) {
+      const row = {
+        date: msg.date || null,
+        sent_time: msg.time || null,
+        writer: msg.writer || null,
+        store,
+        time_start: time.time_start,
+        time_end: time.time_end,
+        item: qtyOnly.item,
+        unit_price: null,
+        qty: qtyOnly.qty,
+        amount: null,
+        total: null,
+        flag: false,
+        raw: qtyOnly.raw,
+        source: 'local',
+        residual: true
+      };
+      pendingCalcRow = row;
+      residualRows.push(row);
+      pendingItem = null;
+      continue;
+    }
     const calcOnly = parseCalcOnlyLocal(line);
     if (calcOnly && pendingItem) {
       const row = {
@@ -1111,7 +1159,7 @@ function parseReportLocal(msg) {
       pendingItem = null;
       continue;
     }
-    if (!/[0-9]/.test(line) && line.length <= 40 && !/(님이|사진|동영상|이모티콘)/.test(line)) {
+    if (!/[xX×*횞=]/.test(line) && /[A-Za-z가-힣]/.test(line) && line.length <= 40 && !looksLikeTotalLine(line) && !parseTimeRangeLocal(line).time_start && !/(님이|사진|동영상|이모티콘)/.test(line)) {
       pendingItem = line;
     }
   }
@@ -1121,6 +1169,26 @@ function parseReportLocal(msg) {
     rows.forEach(r => { if (!r.store) r.store = store; });
   }
   if (total != null && rows.length > 0) {
+    for (const r of rows) {
+      if (!r.ambiguous && r.amount == null && r.unit_price != null && r.qty != null) {
+        if (/1\s*\+\s*1/.test(String(r.raw || '')) && r.qty % 2 === 0) {
+          r.amount = r.unit_price * (r.qty / 2);
+          r.estimated = true;
+          r.remark = r.remark || '1+1 \uAE30\uC900 \uC218\uB7C9 \uC808\uBC18\uC73C\uB85C \uCD94\uC815';
+        } else {
+          r.amount = r.unit_price * r.qty;
+        }
+      }
+    }
+    const unresolvedResiduals = residualRows.filter(r => r.amount == null);
+    if (unresolvedResiduals.length === 1) {
+      const knownSum = rows.reduce((sum, r) => sum + (Number.isFinite(r.amount) ? r.amount : 0), 0);
+      const rest = total - knownSum;
+      if (rest >= 0) {
+        unresolvedResiduals[0].amount = rest;
+        unresolvedResiduals[0].remark = '\uD569\uACC4 \uCC28\uC561\uC73C\uB85C \uC0B0\uCD9C';
+      }
+    }
     rows.push({
       date: msg.date || null,
       sent_time: msg.time || null,
