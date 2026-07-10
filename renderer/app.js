@@ -785,10 +785,21 @@ function normalizeRows(rows) {
 
 function parseMoneyLike(text) {
   if (!text) return null;
-  const matches = String(text).match(/\d[\d,.]*\d/g);
-  if (!matches || !matches.length) return null;
-  const n = Number(matches[matches.length - 1].replace(/[,.]/g, ''));
-  return Number.isFinite(n) ? Math.round(n) : null;
+  const src = String(text);
+  const re = /\d[\d,.]*/g;
+  let last = null;
+  let lastEnd = -1;
+  let m;
+  while ((m = re.exec(src))) {
+    last = m[0];
+    lastEnd = m.index + m[0].length;
+  }
+  if (last == null) return null;
+  let n = Number(last.replace(/[,.]/g, ''));
+  if (!Number.isFinite(n)) return null;
+  // "40만원" → 400,000
+  if (/^\s*만/.test(src.slice(lastEnd))) n *= 10000;
+  return Math.round(n);
 }
 
 function parseLocalNumberToken(v) {
@@ -845,13 +856,104 @@ function cleanLocalItemName(name) {
 }
 
 function looksLikeTotalLine(line) {
-  return /(총|합계|소계|행사결과|total)/i.test(line) && /[\d,]{3,}/.test(line);
+  const s = String(line || '');
+  // "목표 40만원"은 목표치일 뿐 실적 합계가 아니다 ("목포"는 흔한 오타)
+  if (/목[표포]/.test(s) && !/(실적|총|합계|판매|매출|결과)/.test(s)) {
+    // 단, "목표 40만원 / 382,340원"처럼 목표 뒤에 실적 금액을 병기하면 합계로 인정
+    const tokens = s.match(/\d[\d,.]*\s*만?\s*원?/g) || [];
+    return tokens.length >= 2 && /[\d,.]{4,}/.test(tokens[tokens.length - 1]);
+  }
+  return /(총|합계|소계|행사결과|실적|매출|판매액|판매금액|결과|total)/i.test(s)
+    && (/[\d,]{3,}/.test(s) || /\d+\s*만\s*원/.test(s));
+}
+
+// 카톡 입력 중 계산식이 줄 중간에서 끊긴 경우 복원
+// 예: "부추창펀 390×2" ↵ "6개×6980=41,880" ↵ "원" → 한 줄로 병합
+function repairBrokenLines(lines) {
+  const out = [];
+  for (const line of lines) {
+    const prev = out.length ? out[out.length - 1] : null;
+    if (prev) {
+      if (/^원\.?$/.test(line)) { out[out.length - 1] = prev + line; continue; }
+      const prevCutMidCalc = /[xX×*횞]\s*[\d,.]*$/.test(prev);
+      const contHead = /^(?:[\d,.]{0,4}\s*개\s*[xX×*횞]|[xX×*횞]|=)/.test(line);
+      if (prevCutMidCalc && contHead) { out[out.length - 1] = prev + line; continue; }
+      if (/^=/.test(line) && /[\d,.]$/.test(prev)) { out[out.length - 1] = prev + line; continue; }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+// 금액/계산식이 있는 줄 = 품목 행으로 변환되어야 할 줄
+function isSignalLine(line) {
+  const s = String(line || '');
+  if (looksLikeTotalLine(s)) return false;
+  if (/목[표포]/.test(s)) return false;
+  const hasCalc = /[0-9]\s*[xX×*횞]\s*[0-9]/.test(s) || (/[xX×*횞]/.test(s) && /[\d,.]{3,}/.test(s));
+  const hasMoney = /[\d,][\d,.]{2,}\s*원/.test(s) || /=\s*[\d,.]{2,}/.test(s);
+  return hasCalc || hasMoney;
+}
+
+// 로컬 파싱 결과가 원문을 충분히 커버했는지 검증.
+// 불충분하면 하이브리드 모드에서 해당 메시지를 통째로 AI에 재처리시킨다.
+function assessLocalParse(msg, parsed) {
+  const reasons = [];
+  const lines = parsed.lines
+    || repairBrokenLines(String(msg?.body || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean));
+  const signalCount = lines.filter(isSignalLine).length;
+  const itemRows = parsed.rows.filter(r => r.item != null && String(r.item).trim() !== '');
+  const subtotal = parsed.rows.find(r => (r.item == null || String(r.item).trim() === '') && r.total != null);
+  if (itemRows.length < signalCount) {
+    reasons.push(`금액 줄 ${signalCount}개 중 ${itemRows.length}개만 인식`);
+  }
+  if (!subtotal && lines.some(looksLikeTotalLine)) {
+    reasons.push('합계 줄 미인식');
+  }
+  if (subtotal && subtotal.total > 0 && itemRows.length > 0
+      && itemRows.every(r => Number.isFinite(r.amount))) {
+    const sum = itemRows.reduce((s, r) => s + r.amount, 0);
+    if (Math.abs(sum - subtotal.total) / subtotal.total > 0.15) {
+      reasons.push(`품목합(${sum.toLocaleString()})과 보고 합계(${subtotal.total.toLocaleString()}) 큰 차이`);
+    }
+  }
+  if (signalCount > 0 && itemRows.some(r => r.amount == null && (r.unit_price == null || r.qty == null))) {
+    reasons.push('금액 미확정 품목');
+  }
+  return { ok: reasons.length === 0, reasons };
 }
 
 function parseItemLineLocal(line, fallbackItem) {
   const text = String(line || '').trim();
   if (!text || looksLikeTotalLine(text)) return null;
   const mul = '[xX×*횞]';
+  // ×가 두 번 나오는 계산식: "새우하가우 320g×2개×6980=41,880원", "부추창펀 390×26개×6980=41,880원"
+  // 규격·수량·단가 해석이 엇갈리므로 금액÷단가로 수량을 검증/추정한다.
+  const doubleMulRe = new RegExp(`^(.+?)\\s*([0-9][\\d,.]*)\\s*(?:g|kg|ml|l|L)?\\s*${mul}\\s*([0-9][\\d,.]*)\\s*(?:개|봉|팩|박스|ea)?\\s*${mul}\\s*([0-9][\\d,.]*)\\s*(?:원)?\\s*=\\s*([0-9][\\d,.]{2,})\\s*(?:원)?$`);
+  const dm = text.match(doubleMulRe);
+  if (dm) {
+    const item = cleanLocalItemName(dm[1]) || fallbackItem || null;
+    const n2 = parseLocalNumberToken(dm[3]);
+    const price = parseLocalNumberToken(dm[4]);
+    const amount = parseLocalNumberToken(dm[5]);
+    if (item && Number.isFinite(price) && Number.isFinite(amount) && price > 0) {
+      if (Number.isFinite(n2) && price * n2 === amount) {
+        return { item, unit_price: price, qty: n2, amount, raw: text };
+      }
+      if (amount % price === 0) {
+        return {
+          item, unit_price: price, qty: amount / price, amount, raw: text,
+          ambiguous: true,
+          remark: `계산식 표기 불명확 — 수량은 금액÷단가(${formatWonLocal(amount)}÷${formatWonLocal(price)})로 추정`
+        };
+      }
+      return {
+        item, unit_price: price, qty: Number.isFinite(n2) ? n2 : null, amount, raw: text,
+        ambiguous: true,
+        remark: '계산식 표기 불명확 — 검토 필요'
+      };
+    }
+  }
   const rangeRe = new RegExp(`^(.+?)[\\s\\-:]*([0-9][\\d,.]{1,7})\\s*[~\\-]\\s*([0-9][\\d,.]{1,7})\\s*${mul}\\s*([0-9][\\d,.]{0,5})?(?:\\s*(?:\\uAC1C|\\uBD09|\\uD329|\\uBC15\\uC2A4|ea))?\\s*=?\\s*([0-9][\\d,.]{2,})?$`);
   const rangeMatch = text.match(rangeRe);
   if (rangeMatch) {
@@ -906,7 +1008,7 @@ function parseItemLineLocal(line, fallbackItem) {
       raw: text
     };
   }
-  const numericOnly = new RegExp(`^([0-9][\\d,.]{0,7})\\s*(?:원)?\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*\\([^)]*\\))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?$`).exec(text);
+  const numericOnly = new RegExp(`^([0-9][\\d,.]{0,7})\\s*(?:원)?\\s*${mul}\\s*([0-9][\\d,.]{0,5})(?:\\s*(?:개|봉|팩|박스|ea))?(?:\\s*\\([^)]*\\))?(?:\\s*=\\s*([0-9][\\d,.]{2,}))?\\s*(?:원)?$`).exec(text);
   if (numericOnly && fallbackItem) {
     let a = Number(numericOnly[1].replace(/[,.]/g, ''));
     let b = Number(numericOnly[2].replace(/[,.]/g, ''));
@@ -919,12 +1021,21 @@ function parseItemLineLocal(line, fallbackItem) {
     }
     return { item: fallbackItem, unit_price, qty, amount: Number.isFinite(amount) ? amount : null, raw: text };
   }
+  // 품목명 + 금액만 있는 줄: "기타   34,100원"
+  const nameAmount = text.match(/^([^\d=~×xX*]{1,40}?)\s+([\d,.]{4,})\s*원$/);
+  if (nameAmount) {
+    const item = cleanLocalItemName(nameAmount[1]);
+    const amount = parseLocalNumberToken(nameAmount[2]);
+    if (item && Number.isFinite(amount) && amount >= 1000) {
+      return { item, unit_price: null, qty: null, amount, raw: text };
+    }
+  }
   return null;
 }
 
 function parseCalcOnlyLocal(line) {
   const text = String(line || '').trim();
-  const m = text.match(/^([0-9][\d,.]{1,7})\s*(?:원)?\s*[xX×*횞]\s*([0-9][\d,.]{0,5})(?:\s*(?:개|봉|팩|박스|ea))?(?:\s*\([^)]*\))?\s*=?\s*([0-9][\d,.]{2,})?$/);
+  const m = text.match(/^([0-9][\d,.]{1,7})\s*(?:원)?\s*[xX×*횞]\s*([0-9][\d,.]{0,5})(?:\s*(?:개|봉|팩|박스|ea))?(?:\s*\([^)]*\))?\s*=?\s*([0-9][\d,.]{2,})?\s*(?:원)?$/);
   if (!m) return null;
   let a = Number(m[1].replace(/[,.]/g, ''));
   let b = Number(m[2].replace(/[,.]/g, ''));
@@ -1009,7 +1120,7 @@ function parseInlineItemsLocal(line) {
 }
 
 function parseReportLocal(msg) {
-  const lines = String(msg.body || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const lines = repairBrokenLines(String(msg.body || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean));
   const joined = lines.join('\n');
   const time = parseTimeRangeLocal(joined);
   let store = null;
@@ -1058,6 +1169,8 @@ function parseReportLocal(msg) {
       total = parseMoneyLike(line);
       continue;
     }
+    // "목표 40만원" 등 목표치 줄은 품목/합계 어느 쪽으로도 쓰지 않는다
+    if (/목[표포]/.test(line)) continue;
     if (/^\d{1,2}\s*(?:시)?\s*[~\-]\s*\d{1,2}\s*(?:시)?$/.test(line)) continue;
     if (/^(시간|행사결과|보고|정산)$/i.test(line)) continue;
     const inlineItems = parseInlineItemsLocal(line);
@@ -1168,18 +1281,19 @@ function parseReportLocal(msg) {
     store = lines.find(line => !/[xX×*=]/.test(line) && !parseTimeRangeLocal(line).time_start && !looksLikeTotalLine(line)) || null;
     rows.forEach(r => { if (!r.store) r.store = store; });
   }
-  if (total != null && rows.length > 0) {
-    for (const r of rows) {
-      if (!r.ambiguous && r.amount == null && r.unit_price != null && r.qty != null) {
-        if (/1\s*\+\s*1/.test(String(r.raw || '')) && r.qty % 2 === 0) {
-          r.amount = r.unit_price * (r.qty / 2);
-          r.estimated = true;
-          r.remark = r.remark || '1+1 \uAE30\uC900 \uC218\uB7C9 \uC808\uBC18\uC73C\uB85C \uCD94\uC815';
-        } else {
-          r.amount = r.unit_price * r.qty;
-        }
+  // \uB2E8\uAC00\u00D7\uC218\uB7C9\uC774 \uD655\uC815\uB41C \uD589\uC740 \uD569\uACC4 \uC874\uC7AC \uC5EC\uBD80\uC640 \uBB34\uAD00\uD558\uAC8C \uAE08\uC561\uC744 \uCC44\uC6B4\uB2E4
+  for (const r of rows) {
+    if (!r.ambiguous && r.amount == null && r.unit_price != null && r.qty != null) {
+      if (/1\s*\+\s*1/.test(String(r.raw || '')) && r.qty % 2 === 0) {
+        r.amount = r.unit_price * (r.qty / 2);
+        r.estimated = true;
+        r.remark = r.remark || '1+1 \uAE30\uC900 \uC218\uB7C9 \uC808\uBC18\uC73C\uB85C \uCD94\uC815';
+      } else {
+        r.amount = r.unit_price * r.qty;
       }
     }
+  }
+  if (total != null && rows.length > 0) {
     const unresolvedResiduals = residualRows.filter(r => r.amount == null);
     if (unresolvedResiduals.length === 1) {
       const knownSum = rows.reduce((sum, r) => sum + (Number.isFinite(r.amount) ? r.amount : 0), 0);
@@ -1206,7 +1320,7 @@ function parseReportLocal(msg) {
       source: 'local'
     });
   }
-  return { rows, unresolved: rows.length === 0 };
+  return { rows, unresolved: rows.length === 0, lines };
 }
 
 function isBulkWorkload({ fileSize = 0, messageCount = 0, candidateCount = 0 } = {}) {
@@ -1263,16 +1377,28 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress, modelOv
   let aiCount = 0;
   let skippedCount = 0;
   let reviewCount = 0;
+  let escalatedCount = 0;
   if (mode !== 'ai') {
     let scanned = 0;
     for (const item of items) {
       scanned++;
       const parsed = parseReportLocal(item.msg);
-      if (parsed.rows.length) {
+      // 로컬 파싱이 행을 만들었어도 원문 커버리지를 검증한다.
+      // 불완전하면(금액 줄 누락·합계 미인식·큰 합계 불일치) 메시지 전체를 AI로 넘긴다.
+      const quality = parsed.rows.length ? assessLocalParse(item.msg, parsed) : null;
+      if (parsed.rows.length && quality.ok) {
         localRawRows.push(...parsed.rows);
         localCount++;
-      } else if (mode === 'hybrid' && shouldAskAiForReport(item.msg)) {
+      } else if (mode === 'hybrid' && (parsed.rows.length || shouldAskAiForReport(item.msg))) {
+        if (parsed.rows.length) escalatedCount++;
         aiItems.push(item);
+      } else if (parsed.rows.length) {
+        // 로컬 전용 모드: 불완전해도 파싱된 행은 보존하고 검토 행으로 원문을 남긴다
+        parsed.rows.forEach(r => { if (r.item != null) r.flag = true; });
+        localRawRows.push(...parsed.rows);
+        reviewRows.push(makeReviewRow(item, `로컬 분석 불완전: ${quality.reasons.join(', ')}`));
+        localCount++;
+        reviewCount++;
       } else {
         skippedCount++;
       }
@@ -1328,7 +1454,7 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress, modelOv
     reviewRows.forEach(r => r.processed_at = runStamp);
     allRows.push(...reviewRows);
   }
-  return { rows: allRows, localCount, aiCount, skippedCount, reviewCount };
+  return { rows: allRows, localCount, aiCount, skippedCount, reviewCount, escalatedCount };
 }
 
 /* =========================================================================
@@ -1489,7 +1615,7 @@ document.getElementById('runTxt').addEventListener('click', async () => {
     }, effectiveModel);
     const allRows = processed.rows;
     newHashes.push(...fresh.map(x => x.hash));
-    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} (재검증 ${processed.escalatedCount}) / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
     setProgress(85);
 
     currentRows = allRows;
@@ -1575,7 +1701,7 @@ document.getElementById('runPaste').addEventListener('click', async () => {
     const processed = await processItemsWithMode([item], cache.activeKeyValue, runStamp);
     currentRows = processed.rows;
     renderTable();
-    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
+    setStep('ai', 'done', `local ${processed.localCount} / AI ${processed.aiCount} (재검증 ${processed.escalatedCount}) / review ${processed.reviewCount} / skip ${processed.skippedCount}`);
     setStep('excel', 'done', '수동 저장 대기');
     setProgress(100);
     setTimeout(hideProgress, 600);
