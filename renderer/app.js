@@ -341,6 +341,8 @@ function buildUserPrompt(inputText) {
 
 const RETRYABLE_GEMINI_STATUSES = new Set([429, 500, 502, 503, 504]);
 const GEMINI_RETRY_DELAYS = [1000, 2500, 5000];
+// 429는 분당 한도가 대부분 — 짧은 재시도로는 못 벗어나므로 길게 기다린다
+const GEMINI_RETRY_DELAYS_429 = [3000, 12000, 30000];
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -425,7 +427,8 @@ async function callGemini(apiKey, userText, images = [], modelOverride = null) {
       } catch (e) {
         lastError = e;
         if (!e.retryable || attempt === GEMINI_RETRY_DELAYS.length - 1) break;
-        await sleep(GEMINI_RETRY_DELAYS[attempt]);
+        const delays = e.status === 429 ? GEMINI_RETRY_DELAYS_429 : GEMINI_RETRY_DELAYS;
+        await sleep(delays[attempt]);
       }
     }
     if (geminiData) break;
@@ -1426,8 +1429,8 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress, modelOv
       aiItems.length = 0;
     }
     const BATCH = 15;
-    for (let i = 0; i < aiItems.length; i += BATCH) {
-      const slice = aiItems.slice(i, i + BATCH);
+    let rateLimitedThisBatch = false;
+    const runSlice = async (slice) => {
       const combined = slice.map(x => {
         const m = x.msg;
         return `[DATE: ${m.date}] [TIME: ${m.time}] [WRITER: ${m.writer}]\n${m.body}`;
@@ -1442,12 +1445,42 @@ async function processItemsWithMode(items, apiKey, runStamp, onProgress, modelOv
         allRows.push(...normalized);
         aiCount += slice.length;
       } catch (e) {
+        const status = e && e.status;
+        // 응답 파싱 실패 등은 배치 내 문제 메시지 1건이 원인일 수 있으므로
+        // 반으로 쪼개 재시도해 나머지 메시지를 살린다. 키/한도 오류는 쪼개도 소용없음.
+        if (slice.length > 1 && status !== 403 && status !== 429) {
+          const mid = Math.ceil(slice.length / 2);
+          await runSlice(slice.slice(0, mid));
+          await runSlice(slice.slice(mid));
+          return;
+        }
+        if (status === 429) rateLimitedThisBatch = true;
         for (const item of slice) {
           reviewRows.push(makeReviewRow(item, `AI failed: ${String(e.message || e).slice(0, 180)}`));
           reviewCount++;
         }
       }
       if (onProgress) onProgress(localCount, aiCount, aiItems.length);
+    };
+    // 3배치 연속 한도 초과면 남은 배치는 즉시 검토 행으로 — 헛된 재시도로 수십 분 끌지 않는다
+    let consecutiveRateLimit = 0;
+    for (let i = 0; i < aiItems.length; i += BATCH) {
+      const slice = aiItems.slice(i, i + BATCH);
+      if (consecutiveRateLimit >= 3) {
+        for (const item of slice) {
+          reviewRows.push(makeReviewRow(item, 'AI 한도 소진 — 나중에 "특정 날짜/기간 지정"으로 다시 처리하세요'));
+          reviewCount++;
+        }
+        continue;
+      }
+      rateLimitedThisBatch = false;
+      await runSlice(slice);
+      if (rateLimitedThisBatch) {
+        consecutiveRateLimit++;
+        await sleep(15000);
+      } else {
+        consecutiveRateLimit = 0;
+      }
     }
   }
   if (reviewRows.length > 0) {
